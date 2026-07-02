@@ -125,8 +125,8 @@ seatguard/
 
 `.github/workflows/ci.yml` runs `go vet`, the unit tests, **and the full §6 acceptance harness on Linux, Windows and macOS** — so every backend is validated end-to-end at runtime on each push (not merely cross-compiled), then builds static binaries for all three targets.
 
-- **Windows / Linux** — validated end-to-end (locally on Windows; via CI on Linux).
-- **macOS** — the backend is code-complete and CGO-free; it is exercised by the macOS CI job. Treat it as **beta until that job is confirmed green** on real Apple hardware — its `proc_info(2)` accessors are bounds-checked and fail safe (a layout mismatch causes a missed detection, never a false positive or crash).
+- **Windows / Linux** — validated end-to-end and **gate CI** (locally on Windows; via CI on Linux). These are the deployable targets.
+- **macOS** — the backend is code-complete and CGO-free; the macOS CI job runs the same harness but is **`continue-on-error` (informational, non-gating)** because its `proc_info(2)` accessors are not yet confirmed on Apple hardware. Treat macOS as **beta until that job is green**. Every darwin accessor is bounds-checked and fails safe (a layout mismatch causes a missed detection, never a false positive or crash).
 
 ## Deployment notes
 

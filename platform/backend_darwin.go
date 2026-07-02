@@ -72,24 +72,28 @@ func procInfo(callnum, a2 int32, a3 uint32, arg uint64, buf unsafe.Pointer, size
 }
 
 func listPIDs() ([]int32, error) {
-	// First call with a nil buffer returns the byte count needed.
-	n, err := procInfo(callListPIDs, procAllPIDs, 0, 0, nil, 0)
-	if err != nil {
-		return nil, err
-	}
-	buf := make([]int32, n/4+16)
-	got, err := procInfo(callListPIDs, procAllPIDs, 0, 0, unsafe.Pointer(&buf[0]), int32(len(buf)*4))
-	if err != nil {
-		return nil, err
-	}
-	count := int(got) / 4
-	out := make([]int32, 0, count)
-	for i := 0; i < count; i++ {
-		if buf[i] != 0 {
-			out = append(out, buf[i])
+	// A size-probe (nil buffer) is unreliable here across OS versions, so
+	// grow the buffer until the result isn't truncated. Start generous.
+	size := 4096
+	for {
+		buf := make([]int32, size)
+		got, err := procInfo(callListPIDs, procAllPIDs, 0, 0, unsafe.Pointer(&buf[0]), int32(size*4))
+		if err != nil {
+			return nil, err
 		}
+		count := int(got) / 4
+		if count >= size && size < 1<<20 {
+			size *= 2 // buffer was full → possibly truncated; grow and retry
+			continue
+		}
+		out := make([]int32, 0, count)
+		for i := 0; i < count; i++ {
+			if buf[i] != 0 {
+				out = append(out, buf[i])
+			}
+		}
+		return out, nil
 	}
-	return out, nil
 }
 
 func pidPath(pid int32) (string, error) {
@@ -133,31 +137,32 @@ func (b *darwinBackend) procInfoOf(pid int32) (ProcessInfo, error) {
 	return ProcessInfo{PID: uint32(pid), StartTime: st, ExePath: path}, nil
 }
 
-// listFDs returns (fd, fdtype) pairs for a pid via PROC_PIDLISTFDS.
+// listFDs returns (fd, fdtype) pairs for a pid via PROC_PIDLISTFDS. Uses a
+// grow-loop rather than trusting a nil-buffer size probe.
 func listFDs(pid int32) ([]procFDInfo, error) {
-	n, err := procInfo(callPIDInfo, pid, flavorPIDListFDs, 0, nil, 0)
-	if err != nil {
-		return nil, err
-	}
-	if n == 0 {
-		return nil, nil
-	}
 	const fdSize = 8 // sizeof(struct proc_fdinfo)
-	buf := make([]byte, int(n)+16*fdSize)
-	got, err := procInfo(callPIDInfo, pid, flavorPIDListFDs, 0, unsafe.Pointer(&buf[0]), int32(len(buf)))
-	if err != nil {
-		return nil, err
+	size := 256 * fdSize
+	for {
+		buf := make([]byte, size)
+		got, err := procInfo(callPIDInfo, pid, flavorPIDListFDs, 0, unsafe.Pointer(&buf[0]), int32(size))
+		if err != nil {
+			return nil, err
+		}
+		count := int(got) / fdSize
+		if count*fdSize >= size && size < 1<<20 {
+			size *= 2 // possibly truncated; grow and retry
+			continue
+		}
+		out := make([]procFDInfo, 0, count)
+		for i := 0; i < count; i++ {
+			off := i * fdSize
+			out = append(out, procFDInfo{
+				fd:     int32(binary.LittleEndian.Uint32(buf[off : off+4])),
+				fdType: binary.LittleEndian.Uint32(buf[off+4 : off+8]),
+			})
+		}
+		return out, nil
 	}
-	count := int(got) / fdSize
-	out := make([]procFDInfo, 0, count)
-	for i := 0; i < count; i++ {
-		off := i * fdSize
-		out = append(out, procFDInfo{
-			fd:     int32(binary.LittleEndian.Uint32(buf[off : off+4])),
-			fdType: binary.LittleEndian.Uint32(buf[off+4 : off+8]),
-		})
-	}
-	return out, nil
 }
 
 type procFDInfo struct {

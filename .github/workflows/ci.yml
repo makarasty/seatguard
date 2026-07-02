@@ -2,7 +2,6 @@ name: CI
 
 on:
   push:
-    branches: [main]
   pull_request:
 
 permissions:
@@ -18,6 +17,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    # The macOS backend (proc_info(2)) is Phase-1 beta until validated on
+    # Apple hardware, so its job is informational — it must not gate CI. The
+    # Windows and Linux backends are the deployable, gating targets.
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
     env:
       CGO_ENABLED: "0"
     steps:

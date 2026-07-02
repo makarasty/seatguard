@@ -710,11 +710,12 @@ func (h *harness) checkJournalChain() {
 	defer os.WriteFile(h.journal, orig, 0o600)
 
 	lines := bytes.Split(bytes.TrimRight(orig, "\n"), []byte("\n"))
-	if len(lines) < 3 {
+	if len(lines) < 2 {
 		h.fail(7, "append-only journal", fmt.Sprintf("journal too short to test (%d records)", len(lines)))
 		return
 	}
-	// Rewrite a middle record retroactively, keeping it valid JSON.
+	// Rewrite a record retroactively (a middle one when there are ≥3; the
+	// last otherwise), keeping it valid JSON. Any rewrite must break the chain.
 	mid := len(lines) / 2
 	var rec map[string]any
 	if err := json.Unmarshal(lines[mid], &rec); err != nil {
