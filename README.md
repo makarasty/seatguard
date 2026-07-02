@@ -23,11 +23,30 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/seatguard ./cmd/seatguard
 CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o dist/seatguard ./cmd/seatguard
 ```
 
+## Quick start
+
+Run the interactive wizard — it scans every known Claude location (PATH, `~/.local/bin`, `%LOCALAPPDATA%\Claude-Profiles\**`, MSIX/Store packages via `Get-AppxPackage`, `%LOCALAPPDATA%\AnthropicClaude`, npm globals, and the `node` interpreter), lets you confirm the selection with a checkbox list, enrolls, and offers to start protection or install autostart:
+
+```powershell
+# Windows: build once, then just run it (no arguments = wizard)
+$env:CGO_ENABLED="0"; go build -o seatguard.exe ./cmd/seatguard
+.\seatguard.exe
+```
+
+```bash
+# Linux / macOS
+CGO_ENABLED=0 go build -o seatguard ./cmd/seatguard
+./seatguard            # or: ./seatguard setup
+```
+
+In the wizard: type a number to toggle an entry, `a`/`n` to select all/none, `Enter` to continue, `q` to quit. This is the recommended path; the individual commands below exist for scripting.
+
 ## Commands
 
 | Command | Description | Flags |
 |---------|-------------|-------|
-| `seatguard enroll` | Create the protected baseline (auto-discovers claude/node) | `--claude-path`, `--claude-dir`, `--cred`, `--api-host`, `--api-ip`, `--poll`, `--no-discover` |
+| `seatguard setup` | Interactive wizard: discover all Claude installs, enroll, start (also runs with no arguments) | `--poll`, plus common flags |
+| `seatguard enroll` | Create the protected baseline non-interactively (discovers claude/node) | `--claude-path`, `--claude-dir`, `--cred`, `--api-host`, `--api-ip`, `--poll`, `--no-discover` |
 | `seatguard run` | Foreground polling daemon; verifies DB integrity + its own binary hash at startup and refuses to run on mismatch (fail-safe) | — |
 | `seatguard status` | Daemon state (pid, last poll, alert count) | — |
 | `seatguard verify` | Check baseline HMAC, journal hash chain, daemon self-hash; nonzero exit on violation | — |
@@ -49,14 +68,15 @@ Common flags on all commands: `--db`, `--key`, `--journal`, `--state`
 ```
 seatguard/
 ├── cmd/
-│   ├── seatguard/   # CLI entrypoint (enroll, run, status, verify, log)
+│   ├── seatguard/   # CLI entrypoint (setup wizard, enroll, run, status, verify, log)
 │   ├── harness/     # automated §6 acceptance checks
 │   └── helper/      # test process simulating legit/rogue behaviour
 ├── core/            # OS-independent detection core
 │   ├── engine.go    #   polling loop + legitimacy judgment
 │   ├── store.go     #   HMAC-protected baseline DB
 │   ├── journal.go   #   hash-chained append-only event log
-│   ├── enroll.go    #   baseline creation + Claude discovery
+│   ├── enroll.go    #   baseline creation
+│   ├── discover.go  #   scan all Claude install locations
 │   ├── verify.go    #   integrity self-check
 │   ├── identity.go  #   binary identity (path + hash + signature)
 │   ├── alert.go     #   alert record + emission

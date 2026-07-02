@@ -3,7 +3,6 @@ package core
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"time"
@@ -89,7 +88,13 @@ func Enroll(paths Paths, be platform.Backend, opts EnrollOptions) (*Baseline, er
 	}
 
 	if !opts.NoDiscover {
-		discoverClaude(b, add)
+		for _, f := range DiscoverInstalls() {
+			add(f.Path, f.Interpreter) // best effort; unreadable finds are skipped
+			if f.InstallDir != "" {
+				b.InstallDirs = append(b.InstallDirs, f.InstallDir)
+			}
+		}
+		b.InstallDirs = append(b.InstallDirs, defaultInstallDirs()...)
 	}
 
 	if len(b.Identities) == 0 {
@@ -137,19 +142,12 @@ func Enroll(paths Paths, be platform.Backend, opts EnrollOptions) (*Baseline, er
 	return b, nil
 }
 
-// discoverClaude enrolls what a real machine typically has: the claude
-// launcher, the node binary it runs under, and the install dirs holding
-// the CLI's JS entrypoints.
-func discoverClaude(b *Baseline, add func(string, bool) error) {
-	if p, err := exec.LookPath("claude"); err == nil {
-		add(p, false)
-	}
-	if p, err := exec.LookPath("node"); err == nil {
-		add(p, true)
-	}
+// defaultInstallDirs returns the JS install dirs Claude Code typically
+// uses, for the interpreter rule.
+func defaultInstallDirs() []string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return
+		return nil
 	}
 	candidates := []string{
 		filepath.Join(home, ".claude", "local"),
@@ -160,9 +158,11 @@ func discoverClaude(b *Baseline, add func(string, bool) error) {
 	} else {
 		candidates = append(candidates, "/usr/local/lib/node_modules/@anthropic-ai/claude-code")
 	}
+	var out []string
 	for _, d := range candidates {
 		if st, err := os.Stat(d); err == nil && st.IsDir() {
-			b.InstallDirs = append(b.InstallDirs, d)
+			out = append(out, d)
 		}
 	}
+	return out
 }

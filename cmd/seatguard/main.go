@@ -19,12 +19,18 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+		// No arguments (e.g. double-clicked): interactive setup wizard.
+		if err := cmdSetup(nil); err != nil {
+			fmt.Fprintf(os.Stderr, "seatguard setup: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 	cmd, args := os.Args[1], os.Args[2:]
 	var err error
 	switch cmd {
+	case "setup":
+		err = cmdSetup(args)
 	case "enroll":
 		err = cmdEnroll(args)
 	case "run":
@@ -52,6 +58,8 @@ func usage() {
 	fmt.Fprint(os.Stderr, `usage: seatguard <command> [flags]
 
 commands:
+  setup    interactive wizard: find all Claude installs, enroll, start
+           (also runs when seatguard is launched with no arguments)
   enroll   create the protected baseline of legitimate Claude binaries
   run      start the polling detection daemon (foreground)
   status   show daemon state
