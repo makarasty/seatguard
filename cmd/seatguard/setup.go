@@ -139,26 +139,63 @@ done:
 		fmt.Printf("  %s\n", c)
 	}
 
-	fmt.Printf("\n%sStart protection?%s  [%sY%s]es, run now · [%si%s]nstall autostart · [%sn%s]o\n> ",
-		cBold, cReset, cGreen, cReset, cCyan, cReset, cDim, cReset)
-	choice := "n"
+	commonFlags := []string{"--db", paths.DB, "--key", paths.Key, "--journal", paths.Journal, "--state", paths.State}
+
+	fmt.Printf("\n%sStart protection?%s\n", cBold, cReset)
+	fmt.Printf("  [%sD%s]ashboard — live security view (recommended)\n", cGreen, cReset)
+	trayLabel := "hidden in the system tray"
+	if runtime.GOOS != "windows" {
+		trayLabel = "background (tray: Windows only)"
+	}
+	fmt.Printf("  [%st%s]ray      — run %s\n", cCyan, cReset, trayLabel)
+	fmt.Printf("  [%sr%s]un       — foreground log\n", cCyan, cReset)
+	fmt.Printf("  [%si%s]nstall   — autostart at logon\n", cCyan, cReset)
+	fmt.Printf("  [%sn%s]o        — exit, start later\n> ", cDim, cReset)
+	choice := "d"
 	if in.Scan() {
 		choice = strings.TrimSpace(strings.ToLower(in.Text()))
 	}
 	switch choice {
-	case "", "y", "yes":
-		fmt.Printf("\n%sRunning. Alerts will appear below. Ctrl+C to stop.%s\n", cBold, cReset)
-		return cmdRun([]string{
-			"--db", paths.DB, "--key", paths.Key, "--journal", paths.Journal, "--state", paths.State,
-		})
-	case "i":
+	case "", "d", "dashboard", "y", "yes":
+		// Start a background daemon, then attach the live dashboard.
+		if err := startBackgroundDaemon(commonFlags); err != nil {
+			fmt.Printf("%scould not start background daemon: %v%s\n", cYell, err, cReset)
+			fmt.Println("Falling back to foreground run (Ctrl+C to stop).")
+			return cmdRun(commonFlags)
+		}
+		return cmdDashboard(commonFlags)
+	case "t", "tray":
+		return cmdRun(append(commonFlags, "--tray"))
+	case "r", "run":
+		fmt.Printf("\n%sRunning. Alerts appear below. Ctrl+C to stop.%s\n", cBold, cReset)
+		return cmdRun(commonFlags)
+	case "i", "install":
 		return installAutostart(*paths)
 	default:
 		fmt.Println("\nSetup complete. Start any time with:")
-		fmt.Printf("  seatguard run\n")
-		fmt.Println("Inspect with: seatguard status · seatguard log · seatguard verify")
+		fmt.Printf("  seatguard dashboard   (live view)\n  seatguard run --tray  (background, Windows)\n")
 		return nil
 	}
+}
+
+// startBackgroundDaemon launches `seatguard run` as a detached background
+// process (no visible window on Windows), so the foreground can show the
+// dashboard attached to its state file. Skips if a daemon already appears
+// to be running.
+func startBackgroundDaemon(commonFlags []string) error {
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(self, append([]string{"run"}, commonFlags...)...)
+	hideChildWindow(cmd)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// Detach so it keeps running after this process exits.
+	go func() { _ = cmd.Process.Release() }()
+	return nil
 }
 
 // installAutostart registers a logon task via the Windows Task Scheduler.

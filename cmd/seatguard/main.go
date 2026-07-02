@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
-	"time"
 
 	"seatguard/core"
 	"seatguard/platform"
@@ -35,6 +35,8 @@ func main() {
 		err = cmdEnroll(args)
 	case "run":
 		err = cmdRun(args)
+	case "dashboard", "dash", "ui":
+		err = cmdDashboard(args)
 	case "status":
 		err = cmdStatus(args)
 	case "verify":
@@ -61,8 +63,9 @@ commands:
   setup    interactive wizard: find all Claude installs, enroll, start
            (also runs when seatguard is launched with no arguments)
   enroll   create the protected baseline of legitimate Claude binaries
-  run      start the polling detection daemon (foreground)
-  status   show daemon state
+  run      start the polling detection daemon (foreground; --tray to hide in tray)
+  dashboard  live security dashboard (auto-refreshing TUI)
+  status   one-shot security posture and score
   verify   check baseline HMAC, journal hash chain and daemon self-hash
   log      print the event journal
 
@@ -130,6 +133,7 @@ func cmdEnroll(args []string) error {
 func cmdRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	paths := pathFlags(fs)
+	tray := fs.Bool("tray", false, "run hidden in the system tray (Windows)")
 	fs.Parse(args)
 
 	// Fail-safe startup: refuse to run on any integrity mismatch, loudly.
@@ -157,9 +161,58 @@ func cmdRun(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if *tray {
+		return runInTray(ctx, stop, eng, *paths, b)
+	}
+
 	fmt.Fprintf(os.Stderr, "seatguard running: %d identities, %d cred paths, poll %ds\n",
 		len(b.Identities), len(b.CredPaths), b.PollSecs)
 	return eng.Run(ctx)
+}
+
+// runInTray hides the console, runs the engine in the background, and shows
+// a system-tray icon whose color reflects the live security posture. On
+// non-Windows the tray call returns ErrTrayUnsupported and we fall back to
+// the normal foreground loop.
+func runInTray(ctx context.Context, stop context.CancelFunc, eng *core.Engine, paths core.Paths, b *core.Baseline) error {
+	self, _ := os.Executable()
+	dashArgs := []string{"--db", paths.DB, "--key", paths.Key, "--journal", paths.Journal, "--state", paths.State}
+
+	engErr := make(chan error, 1)
+	go func() { engErr <- eng.Run(ctx) }()
+
+	refresh := func() platform.TrayInfo {
+		p := core.ComputePosture(paths)
+		lvl := platform.TrayGreen
+		switch p.Level {
+		case core.LevelWarning:
+			lvl = platform.TrayYellow
+		case core.LevelAtRisk, core.LevelUnprotected:
+			lvl = platform.TrayRed
+		}
+		info := platform.TrayInfo{
+			Level:      lvl,
+			Tooltip:    fmt.Sprintf("seatguard: %s (score %d/100)", p.Level, p.Score),
+			AlertCount: p.Alerts,
+		}
+		if p.LastAlert != nil {
+			info.AlertText = fmt.Sprintf("%s accessed %s", p.LastAlert.ExePath, p.LastAlert.Target)
+		}
+		return info
+	}
+
+	platform.HideConsole()
+	runtime.LockOSThread()
+	err := platform.RunTray("seatguard", self, dashArgs, refresh, func() { stop() })
+	if err == platform.ErrTrayUnsupported {
+		// Fall back to foreground on non-Windows.
+		fmt.Fprintf(os.Stderr, "seatguard running (tray unsupported here): %d identities\n", len(b.Identities))
+		return <-engErr
+	}
+	stop()
+	<-engErr
+	return err
 }
 
 func cmdStatus(args []string) error {
@@ -167,28 +220,7 @@ func cmdStatus(args []string) error {
 	paths := pathFlags(fs)
 	fs.Parse(args)
 
-	raw, err := os.ReadFile(paths.State)
-	if err != nil {
-		return fmt.Errorf("no daemon state at %s (daemon never ran?): %w", paths.State, err)
-	}
-	var st struct {
-		PID        int       `json:"pid"`
-		StartedAt  time.Time `json:"started_at"`
-		LastPoll   time.Time `json:"last_poll"`
-		Polls      uint64    `json:"polls"`
-		AlertCount uint64    `json:"alert_count"`
-		PollSecs   int       `json:"poll_secs"`
-	}
-	if err := json.Unmarshal(raw, &st); err != nil {
-		return err
-	}
-	age := time.Since(st.LastPoll).Round(time.Second)
-	running := "stale (daemon likely stopped)"
-	if age < time.Duration(st.PollSecs*10)*time.Second {
-		running = "running"
-	}
-	fmt.Printf("state:   %s\npid:     %d\nstarted: %s\nlast poll: %s (%s ago)\npolls:   %d\nalerts:  %d\n",
-		running, st.PID, st.StartedAt.Format(time.RFC3339), st.LastPoll.Format(time.RFC3339), age, st.Polls, st.AlertCount)
+	renderStatusOneShot(*paths)
 	return nil
 }
 

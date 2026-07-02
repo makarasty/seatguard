@@ -39,7 +39,15 @@ CGO_ENABLED=0 go build -o seatguard ./cmd/seatguard
 ./seatguard            # or: ./seatguard setup
 ```
 
-In the wizard: type a number to toggle an entry, `a`/`n` to select all/none, `Enter` to continue, `q` to quit. This is the recommended path; the individual commands below exist for scripting.
+In the wizard: type a number to toggle an entry, `a`/`n` to select all/none, `Enter` to continue, `q` to quit. After enrolling it offers to start a **live dashboard**, run **hidden in the system tray** (Windows), run in the foreground, or install autostart. This is the recommended path; the individual commands below exist for scripting.
+
+### Live security dashboard
+
+`seatguard dashboard` shows an auto-refreshing security view: an overall posture (`PROTECTED` / `NEEDS ATTENTION` / `AT RISK` / `UNPROTECTED`), a 0–100 security score, per-check results, coverage gaps (Claude installs on disk that aren't enrolled, or enrolled binaries whose hash changed after an update), and the latest detection. Hotkeys: `q` quit · `v` re-verify integrity · `u` update the baseline (re-scan installs) · `l` recent journal.
+
+### System tray (Windows)
+
+`seatguard run --tray` hides the console and shows a tray icon whose color tracks the live posture (green = protected, yellow = needs attention, red = at risk / alert). It raises a balloon notification when an unauthorized process is detected. Right-click the icon for: Open dashboard · Show status · Verify integrity · Quit. Double-click opens the dashboard.
 
 ## Commands
 
@@ -47,8 +55,9 @@ In the wizard: type a number to toggle an entry, `a`/`n` to select all/none, `En
 |---------|-------------|-------|
 | `seatguard setup` | Interactive wizard: discover all Claude installs, enroll, start (also runs with no arguments) | `--poll`, plus common flags |
 | `seatguard enroll` | Create the protected baseline non-interactively (discovers claude/node) | `--claude-path`, `--claude-dir`, `--cred`, `--api-host`, `--api-ip`, `--poll`, `--no-discover` |
-| `seatguard run` | Foreground polling daemon; verifies DB integrity + its own binary hash at startup and refuses to run on mismatch (fail-safe) | — |
-| `seatguard status` | Daemon state (pid, last poll, alert count) | — |
+| `seatguard run` | Foreground polling daemon; verifies DB integrity + its own binary hash at startup and refuses to run on mismatch (fail-safe) | `--tray` (Windows: hide in system tray) |
+| `seatguard dashboard` | Live auto-refreshing security dashboard (TUI) | `--refresh` |
+| `seatguard status` | One-shot security posture + score | — |
 | `seatguard verify` | Check baseline HMAC, journal hash chain, daemon self-hash; nonzero exit on violation | — |
 | `seatguard log` | Print event journal (verifies chain) | `--json` for machine-readable output |
 
@@ -68,7 +77,7 @@ Common flags on all commands: `--db`, `--key`, `--journal`, `--state`
 ```
 seatguard/
 ├── cmd/
-│   ├── seatguard/   # CLI entrypoint (setup wizard, enroll, run, status, verify, log)
+│   ├── seatguard/   # CLI: setup wizard, run(+tray), dashboard, enroll, status, verify, log
 │   ├── harness/     # automated §6 acceptance checks
 │   └── helper/      # test process simulating legit/rogue behaviour
 ├── core/            # OS-independent detection core
@@ -77,6 +86,7 @@ seatguard/
 │   ├── journal.go   #   hash-chained append-only event log
 │   ├── enroll.go    #   baseline creation
 │   ├── discover.go  #   scan all Claude install locations
+│   ├── status.go    #   security posture + score model
 │   ├── verify.go    #   integrity self-check
 │   ├── identity.go  #   binary identity (path + hash + signature)
 │   ├── alert.go     #   alert record + emission
