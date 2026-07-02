@@ -39,7 +39,7 @@ CGO_ENABLED=0 go build -o seatguard ./cmd/seatguard
 ./seatguard            # or: ./seatguard setup
 ```
 
-In the wizard: type a number to toggle an entry, `a`/`n` to select all/none, `Enter` to continue, `q` to quit. After enrolling it offers to start a **live dashboard**, run **hidden in the system tray** (Windows), run in the foreground, or install autostart. This is the recommended path; the individual commands below exist for scripting.
+The wizard is fully keyboard-driven (no typing paths, no Enter-per-line): an arrow-key **checklist** to pick which discovered Claude binaries are legitimate (`↑↓` move, `space` toggle, `a`/`n` all/none, `Enter` confirm), then an arrow-key **menu** to choose how to start — live dashboard, hidden in the **system tray** (Windows), foreground, or autostart. This is the recommended path; the individual commands below exist for scripting.
 
 ### Live security dashboard
 
@@ -47,7 +47,7 @@ In the wizard: type a number to toggle an entry, `a`/`n` to select all/none, `En
 
 ### System tray (Windows)
 
-`seatguard run --tray` hides the console and shows a tray icon whose color tracks the live posture (green = protected, yellow = needs attention, red = at risk / alert). It raises a balloon notification when an unauthorized process is detected. Right-click the icon for: Open dashboard · Show status · Verify integrity · Quit. Double-click opens the dashboard.
+`seatguard run --tray` hides the console and shows a tray icon **drawn at runtime** (no resource files) as a rounded badge whose color and glyph track the live posture: green check = protected, amber `!` = needs attention, red `×` = at risk / alert. It raises a balloon notification when an unauthorized process is detected. Right-click the icon for: Open dashboard · Show status · Verify integrity · Quit. Double-click opens the dashboard.
 
 ## Commands
 
@@ -77,7 +77,8 @@ Common flags on all commands: `--db`, `--key`, `--journal`, `--state`
 ```
 seatguard/
 ├── cmd/
-│   ├── seatguard/   # CLI: setup wizard, run(+tray), dashboard, enroll, status, verify, log
+│   ├── seatguard/   # CLI + TUI: setup wizard, run(+tray), dashboard, enroll, status, verify, log
+│   │                #   tui.go = keyboard-driven menu/checklist toolkit
 │   ├── harness/     # automated §6 acceptance checks
 │   └── helper/      # test process simulating legit/rogue behaviour
 ├── core/            # OS-independent detection core

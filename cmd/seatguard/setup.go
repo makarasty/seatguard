@@ -1,41 +1,22 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 
 	"seatguard/core"
 	"seatguard/platform"
 )
 
-// ANSI palette; emptied when the console cannot render escapes.
-var (
-	cBold  = "\x1b[1m"
-	cDim   = "\x1b[2m"
-	cGreen = "\x1b[32m"
-	cCyan  = "\x1b[36m"
-	cRed   = "\x1b[31m"
-	cYell  = "\x1b[33m"
-	cReset = "\x1b[0m"
-)
-
-func initColors() {
-	if !platform.EnableANSI() {
-		cBold, cDim, cGreen, cCyan, cRed, cYell, cReset = "", "", "", "", "", "", ""
-	}
-}
-
-// cmdSetup is the interactive console wizard: discover every Claude
-// install, let the user confirm the selection, enroll, then offer to start
-// protection or install autostart. Also runs when seatguard is launched
-// with no arguments (e.g. double-clicked).
+// cmdSetup is the interactive, fully keyboard-driven setup wizard: discover
+// every Claude install, confirm the selection with an arrow-key checklist,
+// enroll, then pick how to start protection from an arrow-key menu. Also
+// runs when seatguard is launched with no arguments (e.g. double-clicked).
 func cmdSetup(args []string) error {
 	fs := flag.NewFlagSet("setup", flag.ExitOnError)
 	paths := pathFlags(fs)
@@ -43,137 +24,104 @@ func cmdSetup(args []string) error {
 	fs.Parse(args)
 
 	initColors()
-	in := bufio.NewScanner(os.Stdin)
+	kr := newKeyReader()
+	defer kr.close()
+	fmt.Print(scrClear)
 
-	fmt.Printf("%s%sseatguard setup%s — local Claude token-theft detector\n\n", cBold, cCyan, cReset)
-
-	if _, err := os.Stat(paths.DB); err == nil {
-		fmt.Printf("%sA baseline already exists at %s — completing setup will replace it.%s\n\n", cYell, paths.DB, cReset)
-	}
-
-	fmt.Println("Scanning for Claude installations...")
+	// Splash + scan.
+	fmt.Print(banner())
+	fmt.Printf("\n  %s◇%s scanning for Claude installations…\n", cCyan, cReset)
 	found := core.DiscoverInstalls()
 	if len(found) == 0 {
-		fmt.Printf("%sNo Claude installation found.%s\n", cRed, cReset)
-		fmt.Println("Install Claude Code / Claude Desktop first, or enroll a binary explicitly:")
-		fmt.Println("  seatguard enroll --claude-path <path-to-claude.exe>")
+		fmt.Printf("\n  %s✗ no Claude installation found.%s\n", cRed, cReset)
+		fmt.Println("  Install Claude Code / Claude Desktop first, or enroll explicitly:")
+		fmt.Println("    seatguard enroll --claude-path <path-to-claude>")
 		return fmt.Errorf("nothing to enroll")
 	}
 
-	selected := make([]bool, len(found))
-	for i := range selected {
-		selected[i] = true
+	// Checklist (arrow keys + space), all pre-selected.
+	items := make([]checkItem, len(found))
+	for i, f := range found {
+		sub := f.Source
+		if f.Interpreter {
+			sub += " · interpreter (script rule)"
+		}
+		items[i] = checkItem{label: shortPath(f.Path), sub: sub, checked: true}
 	}
-
-	for {
-		fmt.Printf("\n%sFound %d candidate(s):%s\n", cBold, len(found), cReset)
-		for i, f := range found {
-			mark := fmt.Sprintf("%s[x]%s", cGreen, cReset)
-			if !selected[i] {
-				mark = "[ ]"
-			}
-			kind := ""
-			if f.Interpreter {
-				kind = cDim + " (interpreter: script rule applies)" + cReset
-			}
-			fmt.Printf("  %s %2d. %s  %s(%s)%s%s\n", mark, i+1, f.Path, cDim, f.Source, cReset, kind)
-		}
-		fmt.Printf("\nToggle: %snumber%s · all: %sa%s · none: %sn%s · continue: %sEnter%s · quit: %sq%s\n> ",
-			cCyan, cReset, cCyan, cReset, cCyan, cReset, cGreen, cReset, cRed, cReset)
-
-		if !in.Scan() {
-			break // EOF: accept current selection
-		}
-		line := strings.TrimSpace(strings.ToLower(in.Text()))
-		switch {
-		case line == "":
-			goto done
-		case line == "q":
-			fmt.Println("aborted; nothing was written")
-			return nil
-		case line == "a":
-			for i := range selected {
-				selected[i] = true
-			}
-		case line == "n":
-			for i := range selected {
-				selected[i] = false
-			}
-		default:
-			for _, tok := range strings.Fields(line) {
-				if k, err := strconv.Atoi(tok); err == nil && k >= 1 && k <= len(found) {
-					selected[k-1] = !selected[k-1]
-				}
-			}
-		}
+	sub := fmt.Sprintf("%d found · pick which binaries are your legitimate Claude", len(found))
+	if _, err := os.Stat(paths.DB); err == nil {
+		sub += " · replaces existing baseline"
 	}
-done:
+	mask, ok := runChecklist(kr, "Select Claude installations", sub, items)
+	if !ok {
+		fmt.Print(scrClear)
+		fmt.Println("  aborted; nothing was written")
+		return nil
+	}
 
 	opts := core.EnrollOptions{PollSecs: *poll, NoDiscover: true}
-	anySelected := false
 	for i, f := range found {
-		if !selected[i] {
+		if !mask[i] {
 			continue
 		}
-		anySelected = true
 		opts.ExtraBinaries = append(opts.ExtraBinaries, f.Path)
 		if f.InstallDir != "" {
 			opts.InstallDirs = append(opts.InstallDirs, f.InstallDir)
 		}
 	}
-	if !anySelected {
+	if len(opts.ExtraBinaries) == 0 {
+		fmt.Print(scrClear)
 		return fmt.Errorf("no binaries selected; nothing to enroll")
 	}
 
-	fmt.Println("\nEnrolling...")
+	fmt.Print(scrClear)
+	fmt.Printf("\n  %s◇%s enrolling %d binaries…\n", cCyan, cReset, len(opts.ExtraBinaries))
 	b, err := core.Enroll(*paths, platform.New(), opts)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%sEnrolled %d identities.%s Baseline: %s\n", cGreen, len(b.Identities), cReset, paths.DB)
+	fmt.Printf("\n  %s✓ enrolled %d identities%s  %s→ %s%s\n", cGreen, len(b.Identities), cReset, cMuted, paths.DB, cReset)
 	for _, id := range b.Identities {
-		fmt.Printf("  %s  %ssha256=%s...%s\n", id.Path, cDim, id.SHA256[:16], cReset)
+		fmt.Printf("    %s%s%s  %ssha256 %s…%s\n", cReset, shortPath(id.Path), cReset, cMuted, id.SHA256[:12], cReset)
 	}
-	fmt.Printf("\nWatching credential files:\n")
-	for _, c := range b.CredPaths {
-		fmt.Printf("  %s\n", c)
-	}
+	fmt.Printf("  %swatching:%s %s\n", cMuted, cReset, strings.Join(shortPaths(b.CredPaths), ", "))
+	fmt.Printf("\n  %spress any key to continue…%s", cMuted, cReset)
+	kr.next()
 
 	commonFlags := []string{"--db", paths.DB, "--key", paths.Key, "--journal", paths.Journal, "--state", paths.State}
 
-	fmt.Printf("\n%sStart protection?%s\n", cBold, cReset)
-	fmt.Printf("  [%sD%s]ashboard — live security view (recommended)\n", cGreen, cReset)
-	trayLabel := "hidden in the system tray"
+	trayDesc := "run hidden with a status icon"
 	if runtime.GOOS != "windows" {
-		trayLabel = "background (tray: Windows only)"
+		trayDesc = "background (tray icon: Windows only)"
 	}
-	fmt.Printf("  [%st%s]ray      — run %s\n", cCyan, cReset, trayLabel)
-	fmt.Printf("  [%sr%s]un       — foreground log\n", cCyan, cReset)
-	fmt.Printf("  [%si%s]nstall   — autostart at logon\n", cCyan, cReset)
-	fmt.Printf("  [%sn%s]o        — exit, start later\n> ", cDim, cReset)
-	choice := "d"
-	if in.Scan() {
-		choice = strings.TrimSpace(strings.ToLower(in.Text()))
+	menu := []menuItem{
+		{label: "Live dashboard", desc: "start protection + open the live view", hot: 'd'},
+		{label: "System tray", desc: trayDesc, hot: 't'},
+		{label: "Foreground", desc: "run here, stream alerts", hot: 'r'},
+		{label: "Autostart at logon", desc: "install a startup task", hot: 'i'},
+		{label: "Exit", desc: "enrolled; start later", hot: 'x'},
 	}
+	choice := runMenu(kr, "Start protection", "seatguard is enrolled — choose how to run it", menu)
+	fmt.Print(scrClear, curShow)
 	switch choice {
-	case "", "d", "dashboard", "y", "yes":
-		// Start a background daemon, then attach the live dashboard.
+	case 0: // dashboard
 		if err := startBackgroundDaemon(commonFlags); err != nil {
 			fmt.Printf("%scould not start background daemon: %v%s\n", cYell, err, cReset)
 			fmt.Println("Falling back to foreground run (Ctrl+C to stop).")
 			return cmdRun(commonFlags)
 		}
 		return cmdDashboard(commonFlags)
-	case "t", "tray":
+	case 1: // tray
 		return cmdRun(append(commonFlags, "--tray"))
-	case "r", "run":
+	case 2: // foreground
 		fmt.Printf("\n%sRunning. Alerts appear below. Ctrl+C to stop.%s\n", cBold, cReset)
 		return cmdRun(commonFlags)
-	case "i", "install":
+	case 3: // autostart
 		return installAutostart(*paths)
-	default:
-		fmt.Println("\nSetup complete. Start any time with:")
-		fmt.Printf("  seatguard dashboard   (live view)\n  seatguard run --tray  (background, Windows)\n")
+	default: // exit or cancel
+		fmt.Println("\n  Setup complete. Start any time with:")
+		fmt.Printf("    %sseatguard dashboard%s   live view\n", cCyan, cReset)
+		fmt.Printf("    %sseatguard run --tray%s  background (Windows)\n", cCyan, cReset)
 		return nil
 	}
 }
@@ -230,4 +178,38 @@ func installAutostart(paths core.Paths) error {
 	fmt.Println("Start it now with:  schtasks /Run /TN seatguard")
 	fmt.Println("Remove with:        schtasks /Delete /TN seatguard /F")
 	return nil
+}
+
+// banner renders the wizard splash header.
+func banner() string {
+	return "\n" +
+		"  " + cCyan + cBold + "seatguard" + cReset + "  " + cMuted + "· Claude subscription-token guard" + cReset + "\n" +
+		"  " + cMuted + "detects unknown software using your Claude token — locally" + cReset + "\n"
+}
+
+// shortPath trims a long path for display, keeping the last few segments.
+func shortPath(p string) string {
+	const maxLen = 52
+	if len(p) <= maxLen {
+		return p
+	}
+	sep := string(filepath.Separator)
+	parts := strings.Split(p, sep)
+	out := parts[len(parts)-1]
+	for i := len(parts) - 2; i >= 0; i-- {
+		cand := parts[i] + sep + out
+		if len(cand)+1 > maxLen {
+			return "…" + sep + out
+		}
+		out = cand
+	}
+	return p
+}
+
+func shortPaths(ps []string) []string {
+	out := make([]string, len(ps))
+	for i, p := range ps {
+		out[i] = shortPath(p)
+	}
+	return out
 }

@@ -17,13 +17,26 @@ import (
 func levelColor(l core.Level) string {
 	switch l {
 	case core.LevelProtected:
-		return "\x1b[42;30m" // green bg
+		return cInvGreen
 	case core.LevelWarning:
-		return "\x1b[43;30m" // yellow bg
+		return cInvYell
 	case core.LevelAtRisk:
-		return "\x1b[41;37m" // red bg
+		return cInvRed
 	default:
-		return "\x1b[47;30m" // grey bg
+		return cInvGrey
+	}
+}
+
+func levelGlyph(l core.Level) string {
+	switch l {
+	case core.LevelProtected:
+		return "🛡"
+	case core.LevelWarning:
+		return "⚠"
+	case core.LevelAtRisk:
+		return "⛔"
+	default:
+		return "○"
 	}
 }
 
@@ -52,61 +65,60 @@ func scoreBar(score int) string {
 	return col + strings.Repeat("█", filled) + cDim + strings.Repeat("░", width-filled) + cReset
 }
 
-// renderPosture builds the full-screen dashboard frame.
+// renderPosture builds the full-screen dashboard frame in a modern TUI style.
 func renderPosture(p *core.Posture, tick int) string {
 	var b strings.Builder
 	spin := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}[tick%10]
 
-	line := strings.Repeat("─", 62)
-	b.WriteString(fmt.Sprintf("%s%s┌%s┐%s\n", cBold, cCyan, line, cReset))
-	title := "seatguard — Claude subscription-token guard"
-	b.WriteString(fmt.Sprintf("%s%s│%s %-60s %s%s│%s\n", cBold, cCyan, cReset, title, cBold, cCyan, cReset))
-	b.WriteString(fmt.Sprintf("%s%s└%s┘%s\n", cBold, cCyan, line, cReset))
+	// Header.
+	b.WriteString(fmt.Sprintf("\n  %s%s🛡 seatguard%s  %s· live security monitor%s\n",
+		cBold, cCyan, cReset, cMuted, cReset))
 
-	// Headline banner.
-	banner := fmt.Sprintf("  %s  ", p.Level.String())
-	b.WriteString(fmt.Sprintf("\n  %s%s%s   security score %s%d/100%s  %s\n",
-		levelColor(p.Level), banner, cReset, cBold, p.Score, cReset, scoreBar(p.Score)))
+	// Status pill + score bar.
+	pill := fmt.Sprintf(" %s %s ", levelGlyph(p.Level), p.Level.String())
+	b.WriteString(fmt.Sprintf("\n  %s%s%s   %s%d/100%s %s\n",
+		levelColor(p.Level), pill, cReset, cBold, p.Score, cReset, scoreBar(p.Score)))
 
-	mon := cRed + "stopped" + cReset
+	mon := cRed + "○ stopped" + cReset
 	if p.Running {
-		mon = cGreen + "live " + spin + cReset
+		mon = cGreen + "● live " + spin + cReset
 	}
-	b.WriteString(fmt.Sprintf("  monitor: %s   identities: %s%d%s   polls: %d   alerts: %s%d%s\n\n",
-		mon, cBold, p.Identities, cReset, p.Polls, alertColor(p.Alerts), p.Alerts, cReset))
+	b.WriteString(fmt.Sprintf("  %smonitor%s %s   %sidentities%s %s%d%s   %spolls%s %d   %salerts%s %s%d%s\n\n",
+		cMuted, cReset, mon, cMuted, cReset, cBold, p.Identities, cReset,
+		cMuted, cReset, p.Polls, cMuted, cReset, alertColor(p.Alerts), p.Alerts, cReset))
 
 	// Checks.
-	b.WriteString(fmt.Sprintf("  %sSECURITY CHECKS%s\n", cBold, cReset))
+	b.WriteString(fmt.Sprintf("  %s╭─ security checks %s%s\n", cCyan, strings.Repeat("─", 44), cReset))
 	for _, c := range p.Checks {
-		b.WriteString(fmt.Sprintf("   %s %-20s %s%s%s\n", sevGlyph(c.Status), c.Name, cDim, c.Detail, cReset))
+		b.WriteString(fmt.Sprintf("  %s│%s %s %-19s %s%s%s\n", cCyan, cReset, sevGlyph(c.Status), c.Name, cMuted, c.Detail, cReset))
 	}
+	b.WriteString(fmt.Sprintf("  %s╰%s%s\n", cCyan, strings.Repeat("─", 61), cReset))
 
-	// Coverage gaps detail.
+	// Coverage gaps.
 	if len(p.UnenrolledInstalls) > 0 {
-		b.WriteString(fmt.Sprintf("\n  %sUnenrolled Claude installs (press [u] to fix):%s\n", cYell, cReset))
+		b.WriteString(fmt.Sprintf("\n  %s⚠ unenrolled Claude installs%s %s(press u to fix)%s\n", cYell, cReset, cMuted, cReset))
 		for _, u := range p.UnenrolledInstalls {
-			b.WriteString(fmt.Sprintf("   %s· %s%s\n", cDim, u, cReset))
+			b.WriteString(fmt.Sprintf("    %s· %s%s\n", cDim, shortPath(u), cReset))
 		}
 	}
 	if len(p.StaleBinaries) > 0 {
-		b.WriteString(fmt.Sprintf("\n  %sChanged since enroll — likely a Claude update (press [u]):%s\n", cYell, cReset))
+		b.WriteString(fmt.Sprintf("\n  %s⚠ changed since enroll — likely a Claude update%s %s(press u)%s\n", cYell, cReset, cMuted, cReset))
 		for _, s := range p.StaleBinaries {
-			b.WriteString(fmt.Sprintf("   %s· %s%s\n", cDim, s, cReset))
+			b.WriteString(fmt.Sprintf("    %s· %s%s\n", cDim, shortPath(s), cReset))
 		}
 	}
 
 	// Latest alert.
 	if p.LastAlert != nil {
 		a := p.LastAlert
-		b.WriteString(fmt.Sprintf("\n  %s%s⚠ LATEST DETECTION%s\n", cBold, cRed, cReset))
-		b.WriteString(fmt.Sprintf("   signal : %s\n", a.Signal))
-		b.WriteString(fmt.Sprintf("   binary : %s%s%s\n", cRed, a.ExePath, cReset))
-		b.WriteString(fmt.Sprintf("   pid    : %d (start_time %d)\n", a.PID, a.StartTime))
-		b.WriteString(fmt.Sprintf("   target : %s\n", a.Target))
+		b.WriteString(fmt.Sprintf("\n  %s%s⛔ latest detection%s\n", cBold, cRed, cReset))
+		b.WriteString(fmt.Sprintf("    %ssignal%s %s   %sbinary%s %s%s%s\n", cMuted, cReset, a.Signal, cMuted, cReset, cRed, a.ExePath, cReset))
+		b.WriteString(fmt.Sprintf("    %spid%s %d %s(start %d)%s   %starget%s %s\n", cMuted, cReset, a.PID, cDim, a.StartTime, cReset, cMuted, cReset, a.Target))
 	}
 
-	b.WriteString(fmt.Sprintf("\n  %supdated %s · [q]uit  [v]erify  [u]pdate baseline  [l]og%s\n",
-		cDim, p.GeneratedAt.Format("15:04:05"), cReset))
+	b.WriteString(fmt.Sprintf("\n  %supdated %s%s   %s[q]%s quit  %s[v]%s verify  %s[u]%s update  %s[l]%s log\n",
+		cMuted, p.GeneratedAt.Format("15:04:05"), cReset,
+		cCyan, cReset, cCyan, cReset, cCyan, cReset, cCyan, cReset))
 	return b.String()
 }
 

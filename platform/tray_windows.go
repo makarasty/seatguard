@@ -4,7 +4,6 @@ package platform
 
 import (
 	"errors"
-	"os"
 	"os/exec"
 	"syscall"
 	"unsafe"
@@ -57,6 +56,8 @@ var (
 	procPostMessage      = user32.NewProc("PostMessageW")
 
 	procShellNotifyIcon = shell32.NewProc("Shell_NotifyIconW")
+	procCreateIcon      = user32.NewProc("CreateIcon")
+	procDestroyIcon     = user32.NewProc("DestroyIcon")
 
 	procGetConsoleWindow = kernel32.NewProc("GetConsoleWindow")
 	procShowWindow       = user32.NewProc("ShowWindow")
@@ -157,6 +158,8 @@ type tray struct {
 	selfExe    string
 	dashArgs   []string
 	lastAlerts int
+	curIcon    windows.Handle
+	curLevel   int
 	quit       bool
 }
 
@@ -171,19 +174,139 @@ func HideConsole() {
 	}
 }
 
-func stockIcon(level int) windows.Handle {
-	id := idiApplication
+// levelRGB is the badge fill color per status level.
+func levelRGB(level int) (r, g, b byte) {
 	switch level {
 	case TrayGreen:
-		id = idiInformation
+		return 0x3f, 0xb9, 0x50 // green
 	case TrayYellow:
-		id = idiWarning
+		return 0xf1, 0xc4, 0x0f // amber
 	case TrayRed:
-		id = idiError
+		return 0xe0, 0x3b, 0x3b // red
+	default:
+		return 0x9a, 0x9a, 0x9a // grey
 	}
-	h, _, _ := procLoadIcon.Call(0, uintptr(id))
+}
+
+const iconDim = 32
+
+// statusIcon draws a rounded colored badge with a status glyph and returns
+// an HICON. The whole icon is built pixel-by-pixel (no resource files, no
+// cgo): a 32bpp XOR color plane plus a 1bpp AND transparency mask, fed to
+// CreateIcon. Caller owns the handle and must DestroyIcon it.
+func statusIcon(level int) windows.Handle {
+	type px struct {
+		opaque  bool
+		r, g, b byte
+	}
+	var cv [iconDim][iconDim]px
+	fr, fg, fb := levelRGB(level)
+
+	// Rounded-square badge with a 1px lighter border.
+	const radius = 7
+	inCorner := func(x, y int) bool {
+		// Distance from the nearest corner center; outside → transparent.
+		cx, cy := x, y
+		if x >= iconDim-radius {
+			cx = iconDim - 1 - x
+		} else if x >= radius {
+			return false
+		}
+		if y >= iconDim-radius {
+			cy = iconDim - 1 - y
+		} else if y >= radius {
+			return false
+		}
+		dx, dy := radius-1-cx, radius-1-cy
+		return dx*dx+dy*dy > radius*radius
+	}
+	for y := 0; y < iconDim; y++ {
+		for x := 0; x < iconDim; x++ {
+			if inCorner(x, y) {
+				continue // transparent corner
+			}
+			r, g, b := fr, fg, fb
+			// Subtle border ring.
+			if x < 2 || y < 2 || x >= iconDim-2 || y >= iconDim-2 {
+				r, g, b = mix(r, 0xff), mix(g, 0xff), mix(b, 0xff)
+			}
+			cv[y][x] = px{true, r, g, b}
+		}
+	}
+
+	// Dark glyph for contrast.
+	dr, dg, db := byte(0x1a), byte(0x1a), byte(0x1a)
+	plot := func(x, y int) {
+		if x >= 0 && x < iconDim && y >= 0 && y < iconDim && cv[y][x].opaque {
+			cv[y][x] = px{true, dr, dg, db}
+		}
+	}
+	thick := func(f func(int, int)) func(int, int) {
+		return func(x, y int) {
+			for oy := 0; oy < 3; oy++ {
+				for ox := 0; ox < 3; ox++ {
+					f(x+ox-1, y+oy-1)
+				}
+			}
+		}
+	}
+	tp := thick(plot)
+	switch level {
+	case TrayGreen: // check mark
+		for i := 0; i < 5; i++ {
+			tp(10+i, 16+i)
+		}
+		for i := 0; i < 9; i++ {
+			tp(14+i, 20-i)
+		}
+	case TrayYellow: // exclamation
+		for y := 9; y <= 19; y++ {
+			tp(16, y)
+		}
+		tp(16, 23)
+	case TrayRed: // cross
+		for i := 0; i < 12; i++ {
+			tp(10+i, 10+i)
+			tp(10+i, 21-i)
+		}
+	default: // dot
+		tp(16, 16)
+	}
+
+	// Emit XOR (32bpp BGRA, bottom-up) and AND (1bpp, bottom-up; 1=transparent).
+	xor := make([]byte, iconDim*iconDim*4)
+	and := make([]byte, iconDim*4) // 4 bytes/row * 32 rows
+	for y := 0; y < iconDim; y++ {
+		srcRow := iconDim - 1 - y // bottom-up
+		for x := 0; x < iconDim; x++ {
+			p := cv[srcRow][x]
+			off := (y*iconDim + x) * 4
+			if p.opaque {
+				xor[off+0] = p.b
+				xor[off+1] = p.g
+				xor[off+2] = p.r
+				xor[off+3] = 0xff
+			} else {
+				and[y*4+x/8] |= 1 << (7 - uint(x%8)) // transparent bit
+			}
+		}
+	}
+	h, _, _ := procCreateIcon.Call(0, iconDim, iconDim, 1, 32,
+		uintptr(unsafe.Pointer(&and[0])), uintptr(unsafe.Pointer(&xor[0])))
+	if h == 0 {
+		// Fall back to a stock icon so the tray still appears.
+		id := idiInformation
+		if level == TrayRed {
+			id = idiError
+		} else if level == TrayYellow {
+			id = idiWarning
+		}
+		h, _, _ = procLoadIcon.Call(0, uintptr(id))
+	}
 	return windows.Handle(h)
 }
+
+func mix(a, b byte) byte { return byte((int(a) + int(b)) / 2) }
 
 // RunTray creates the tray icon and runs the Win32 message loop on the
 // calling goroutine until the user chooses Quit. The caller must
@@ -221,13 +344,15 @@ func RunTray(title, selfExe string, dashArgs []string, refresh func() TrayInfo, 
 
 	// Initial icon.
 	info := refresh()
+	t.curIcon = statusIcon(info.Level)
+	t.curLevel = info.Level
 	t.nid = notifyIconData{
 		cbSize:           uint32(unsafe.Sizeof(notifyIconData{})),
 		hWnd:             t.hwnd,
 		uID:              1,
 		uFlags:           nifMessage | nifIcon | nifTip,
 		uCallbackMessage: wmTrayCB,
-		hIcon:            stockIcon(info.Level),
+		hIcon:            t.curIcon,
 	}
 	copyUTF16(t.nid.szTip[:], firstNonEmpty(info.Tooltip, title))
 	t.lastAlerts = info.AlertCount
@@ -247,6 +372,9 @@ func RunTray(title, selfExe string, dashArgs []string, refresh func() TrayInfo, 
 		procDispatchMessage.Call(uintptr(unsafe.Pointer(&m)))
 	}
 	procShellNotifyIcon.Call(nimDelete, uintptr(unsafe.Pointer(&t.nid)))
+	if t.curIcon != 0 {
+		procDestroyIcon.Call(uintptr(t.curIcon))
+	}
 	return nil
 }
 
@@ -281,7 +409,16 @@ func wndProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uintpt
 func (t *tray) onRefresh() {
 	info := t.refresh()
 	t.nid.uFlags = nifIcon | nifTip
-	t.nid.hIcon = stockIcon(info.Level)
+	// Only rebuild the icon when the level actually changes (avoids churn).
+	if info.Level != t.curLevel || t.curIcon == 0 {
+		newIcon := statusIcon(info.Level)
+		if t.curIcon != 0 {
+			procDestroyIcon.Call(uintptr(t.curIcon))
+		}
+		t.curIcon = newIcon
+		t.curLevel = info.Level
+	}
+	t.nid.hIcon = t.curIcon
 	copyUTF16(t.nid.szTip[:], firstNonEmpty(info.Tooltip, "seatguard"))
 	// New alert since last refresh → balloon.
 	if info.AlertCount > t.lastAlerts && info.AlertText != "" {
@@ -371,6 +508,3 @@ func firstNonEmpty(a, b string) string {
 	}
 	return b
 }
-
-// ensure os import is used even if future edits drop references.
-var _ = os.Getpid
