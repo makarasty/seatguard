@@ -5,7 +5,9 @@ package platform
 import (
 	"errors"
 	"os/exec"
+	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -84,8 +86,8 @@ const (
 	nifTip     = 0x04
 	nifInfo    = 0x10
 
-	// Stock icon resource IDs (LoadIconW with hInstance = 0).
-	idiApplication = 32512
+	// Stock icon resource IDs (LoadIconW with hInstance = 0), used only as a
+	// fallback if the custom CreateIcon path fails.
 	idiError       = 32513
 	idiWarning     = 32515
 	idiInformation = 32516
@@ -160,7 +162,9 @@ type tray struct {
 	lastAlerts int
 	curIcon    windows.Handle
 	curLevel   int
-	quit       bool
+
+	mu     sync.Mutex // guards latest
+	latest TrayInfo
 }
 
 var gTray *tray
@@ -344,6 +348,7 @@ func RunTray(title, selfExe string, dashArgs []string, refresh func() TrayInfo, 
 
 	// Initial icon.
 	info := refresh()
+	t.latest = info
 	t.curIcon = statusIcon(info.Level)
 	t.curLevel = info.Level
 	t.nid = notifyIconData{
@@ -358,8 +363,23 @@ func RunTray(title, selfExe string, dashArgs []string, refresh func() TrayInfo, 
 	t.lastAlerts = info.AlertCount
 	procShellNotifyIcon.Call(nimAdd, uintptr(unsafe.Pointer(&t.nid)))
 
-	// Refresh every 3s.
-	procSetTimer.Call(hwnd, refreshTimerID, 3000, 0)
+	// Compute the posture OFF the message-loop thread: ComputePosture reads
+	// files and may spawn the OS package manager, which would otherwise
+	// freeze the tray (GetMessage stops pumping) during the call. The timer
+	// only reads the cached result.
+	go func() {
+		tick := time.NewTicker(3 * time.Second)
+		defer tick.Stop()
+		for range tick.C {
+			info := refresh()
+			t.mu.Lock()
+			t.latest = info
+			t.mu.Unlock()
+		}
+	}()
+
+	// Repaint from the cached posture ~1s (cheap: no I/O on this thread).
+	procSetTimer.Call(hwnd, refreshTimerID, 1000, 0)
 
 	// Message loop.
 	var m msg
@@ -407,7 +427,9 @@ func wndProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uintpt
 }
 
 func (t *tray) onRefresh() {
-	info := t.refresh()
+	t.mu.Lock()
+	info := t.latest
+	t.mu.Unlock()
 	t.nid.uFlags = nifIcon | nifTip
 	// Only rebuild the icon when the level actually changes (avoids churn).
 	if info.Level != t.curLevel || t.curIcon == 0 {

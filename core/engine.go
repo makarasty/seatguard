@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -30,16 +29,6 @@ type Engine struct {
 	started time.Time
 }
 
-// state.json contents, consumed by `seatguard status`.
-type daemonState struct {
-	PID        int       `json:"pid"`
-	StartedAt  time.Time `json:"started_at"`
-	LastPoll   time.Time `json:"last_poll"`
-	Polls      uint64    `json:"polls"`
-	AlertCount uint64    `json:"alert_count"`
-	PollSecs   int       `json:"poll_secs"`
-}
-
 // Run executes the poll loop until ctx is cancelled.
 func (e *Engine) Run(ctx context.Context) error {
 	e.hashes = newHashCache()
@@ -63,8 +52,12 @@ func (e *Engine) Run(ctx context.Context) error {
 	defer tick.Stop()
 	dnsTick := time.NewTicker(5 * time.Minute)
 	defer dnsTick.Stop()
-	memTick := time.NewTicker(30 * time.Second)
-	defer memTick.Stop()
+	// Shed the one-time enroll/verify allocation peak shortly after startup,
+	// then stop: a periodic FreeOSMemory would force a full STW GC on a
+	// daemon that is meant to sit at idle-CPU near zero (the heap is already
+	// bounded by SetGCPercent above and the per-tick work is small).
+	settle := time.NewTimer(10 * time.Second)
+	defer settle.Stop()
 
 	for {
 		select {
@@ -75,7 +68,7 @@ func (e *Engine) Run(ctx context.Context) error {
 			if len(e.Baseline.APIHosts) > 0 {
 				e.ips.refresh(ctx)
 			}
-		case <-memTick.C:
+		case <-settle.C:
 			debug.FreeOSMemory()
 		case <-tick.C:
 			e.pollOnce()
@@ -88,7 +81,7 @@ func (e *Engine) Run(ctx context.Context) error {
 }
 
 func (e *Engine) writeState(poll time.Duration) {
-	st := daemonState{
+	st := DaemonState{
 		PID:        os.Getpid(),
 		StartedAt:  e.started,
 		LastPoll:   time.Now(),
@@ -96,11 +89,7 @@ func (e *Engine) writeState(poll time.Duration) {
 		AlertCount: e.nAlerts,
 		PollSecs:   int(poll.Seconds()),
 	}
-	raw, err := json.MarshalIndent(&st, "", "  ")
-	if err != nil {
-		return
-	}
-	os.WriteFile(e.Paths.State, raw, 0o600)
+	st.Write(e.Paths.State)
 }
 
 // pollOnce takes one snapshot of both signals.
@@ -197,8 +186,20 @@ func (e *Engine) judgeInterpreter(p platform.ProcessInfo, hash string) (bool, st
 	if !filepath.IsAbs(script) {
 		return true, hash, "" // relative script path: cannot attribute reliably in Phase 1
 	}
+	// Guard against acting on a garbage argv: reading another process's
+	// command line can yield junk (e.g. a 64-bit daemon reading a 32-bit
+	// WOW64 target's PEB on Windows). If the "script" path doesn't exist on
+	// disk, we can't trust the read — fail open with a warning instead of
+	// raising a false alert on a legitimate interpreter.
+	if _, statErr := os.Stat(script); statErr != nil {
+		e.Journal.Append("warning", map[string]any{
+			"msg": "interpreter script path unreadable/absent; skipping script check",
+			"pid": p.PID, "exe": p.ExePath, "script": script,
+		})
+		return true, hash, ""
+	}
 	for _, dir := range e.Baseline.InstallDirs {
-		if strings.HasPrefix(strings.ToLower(filepath.Clean(script)), strings.ToLower(filepath.Clean(dir))) {
+		if strings.HasPrefix(NormPath(script), NormPath(dir)) {
 			return true, hash, ""
 		}
 	}

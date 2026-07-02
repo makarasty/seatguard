@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"seatguard/platform"
 )
 
 // Entry is one journal record. Records form an HMAC chain: each MAC
@@ -42,11 +44,12 @@ func entryMAC(key []byte, prevMAC string, e *Entry) string {
 
 // Journal is an append-only, hash-chained event log.
 type Journal struct {
-	mu      sync.Mutex
-	path    string
-	key     []byte
-	lastSeq uint64
-	lastMAC string
+	mu       sync.Mutex
+	path     string
+	key      []byte
+	lastSeq  uint64
+	lastMAC  string
+	hardened bool
 }
 
 // OpenJournal opens (creating if needed) the journal and loads chain state.
@@ -63,6 +66,12 @@ func OpenJournal(path string, key []byte) (*Journal, error) {
 	if n := len(entries); n > 0 {
 		j.lastSeq = entries[n-1].Seq
 		j.lastMAC = entries[n-1].MAC
+	}
+	// Match the DB/key on-disk posture (protected DACL on Windows) once the
+	// file exists; a fresh journal is hardened on first Append.
+	if _, statErr := os.Stat(path); statErr == nil {
+		platform.HardenFile(path)
+		j.hardened = true
 	}
 	return j, nil
 }
@@ -122,6 +131,10 @@ func (j *Journal) Append(typ string, data any) error {
 	}
 	j.lastSeq = e.Seq
 	j.lastMAC = e.MAC
+	if !j.hardened {
+		platform.HardenFile(j.path) // restrict DACL on the freshly created file
+		j.hardened = true
+	}
 	return nil
 }
 

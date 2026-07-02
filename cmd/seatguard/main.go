@@ -142,6 +142,9 @@ func cmdRun(args []string) error {
 		fmt.Fprintln(os.Stderr, "ALERT [integrity] seatguard refuses to start: baseline/journal/self verification failed")
 		os.Exit(2)
 	}
+	if !platform.IsPrivileged() {
+		fmt.Fprintln(os.Stderr, "WARNING: running unprivileged — the baseline/key/journal are not owner-protected, so tamper-evidence is weakened. Run elevated (Administrator/root) with the default paths for full protection.")
+	}
 
 	eng := &core.Engine{
 		Backend:  platform.New(),
@@ -177,7 +180,7 @@ func cmdRun(args []string) error {
 // the normal foreground loop.
 func runInTray(ctx context.Context, stop context.CancelFunc, eng *core.Engine, paths core.Paths, b *core.Baseline) error {
 	self, _ := os.Executable()
-	dashArgs := []string{"--db", paths.DB, "--key", paths.Key, "--journal", paths.Journal, "--state", paths.State}
+	dashArgs := paths.Args()
 
 	engErr := make(chan error, 1)
 	go func() { engErr <- eng.Run(ctx) }()

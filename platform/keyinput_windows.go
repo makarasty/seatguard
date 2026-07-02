@@ -3,6 +3,7 @@
 package platform
 
 import (
+	"os"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -44,19 +45,21 @@ type winKeyInput struct {
 	h        windows.Handle
 	prevMode uint32
 	restored bool
-	haveMode bool
+	console  bool
 }
 
 // NewKeyInput reads decoded key events straight from the console input
 // buffer via ReadConsoleInputW, which reports arrow keys as virtual-key
 // codes — independent of the byte-stream / VT-input quirks that make arrows
-// invisible to a plain stdin read on Windows.
+// invisible to a plain stdin read on Windows. When stdin is NOT a console
+// (piped/redirected), it falls back to decoding the byte stream so scripted
+// input still works instead of the reader instantly returning Esc.
 func NewKeyInput() KeyInput {
 	h := windows.Handle(windows.Stdin)
 	w := &winKeyInput{h: h}
 	var mode uint32
 	if err := windows.GetConsoleMode(h, &mode); err == nil {
-		w.prevMode, w.haveMode = mode, true
+		w.prevMode, w.console = mode, true
 		raw := mode &^ (windows.ENABLE_LINE_INPUT | windows.ENABLE_ECHO_INPUT | windows.ENABLE_PROCESSED_INPUT)
 		windows.SetConsoleMode(h, raw)
 	}
@@ -64,6 +67,9 @@ func NewKeyInput() KeyInput {
 }
 
 func (w *winKeyInput) Read() (Key, byte) {
+	if !w.console {
+		return readKeyBytes(os.Stdin) // redirected/piped stdin
+	}
 	var rec inputRecord
 	var read uint32
 	for {
@@ -107,7 +113,7 @@ func (w *winKeyInput) Read() (Key, byte) {
 }
 
 func (w *winKeyInput) Close() {
-	if w.haveMode && !w.restored {
+	if w.console && !w.restored {
 		windows.SetConsoleMode(w.h, w.prevMode)
 		w.restored = true
 	}

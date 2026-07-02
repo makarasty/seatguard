@@ -56,13 +56,12 @@ func (s *ipSet) refresh(ctx context.Context) {
 	s.mu.Unlock()
 }
 
-// snapshot returns a copy of the current set for one poll tick.
+// snapshot returns the current set as a read-only map. refresh replaces the
+// whole map atomically under the write lock, so a caller holding a returned
+// reference sees a stable set and must not mutate it — avoiding a full map
+// copy on every poll tick.
 func (s *ipSet) snapshot() map[string]struct{} {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make(map[string]struct{}, len(s.ips))
-	for ip := range s.ips {
-		out[ip] = struct{}{}
-	}
-	return out
+	return s.ips
 }

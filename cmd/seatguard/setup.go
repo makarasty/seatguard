@@ -88,7 +88,7 @@ func cmdSetup(args []string) error {
 	fmt.Printf("\n  %spress any key to continue…%s", cMuted, cReset)
 	kr.next()
 
-	commonFlags := []string{"--db", paths.DB, "--key", paths.Key, "--journal", paths.Journal, "--state", paths.State}
+	commonFlags := paths.Args()
 
 	trayDesc := "run hidden with a status icon"
 	if runtime.GOOS != "windows" {

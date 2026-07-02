@@ -44,10 +44,13 @@ func initColors() {
 	if platform.EnableANSI() {
 		return
 	}
-	// No ANSI: blank every escape.
+	// Not a VT terminal (piped/redirected): blank every escape, including the
+	// screen/cursor controls, so output is plain text instead of raw escape
+	// bytes.
 	cReset, cBold, cDim = "", "", ""
 	cRed, cGreen, cYell, cCyan, cMuted, cAccent = "", "", "", "", "", ""
 	cInvGreen, cInvYell, cInvRed, cInvGrey = "", "", "", ""
+	scrClear, scrHome, scrErase, curHide, curShow, cursorHome = "", "", "", "", "", ""
 }
 
 // ---- key decoding ----
@@ -110,12 +113,16 @@ func (kr *keyReader) next() keyEvent {
 
 // ---- screen helpers ----
 
-const (
-	scrClear = "\x1b[H\x1b[2J"
-	scrHome  = "\x1b[H"
-	scrErase = "\x1b[0J"
-	curHide  = "\x1b[?25l"
-	curShow  = "\x1b[?25h"
+// Screen/cursor controls — vars (not consts) so initColors can blank them
+// when stdout is not a VT terminal. cursorHome = home + erase-below, used to
+// redraw a full-screen frame in place.
+var (
+	scrClear   = "\x1b[H\x1b[2J"
+	scrHome    = "\x1b[H"
+	scrErase   = "\x1b[0J"
+	cursorHome = "\x1b[H\x1b[0J"
+	curHide    = "\x1b[?25l"
+	curShow    = "\x1b[?25h"
 )
 
 // ---- single-select menu ----

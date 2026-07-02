@@ -52,11 +52,17 @@ func HashFile(path string) (string, int64, error) {
 
 // SamePath compares two executable paths, case-insensitively on Windows.
 func SamePath(a, b string) bool {
-	a, b = filepath.Clean(a), filepath.Clean(b)
+	return NormPath(a) == NormPath(b)
+}
+
+// NormPath cleans a path and folds case on Windows, yielding a value safe to
+// use as a comparison key or map key across the codebase.
+func NormPath(p string) string {
+	p = filepath.Clean(p)
 	if runtime.GOOS == "windows" {
-		return strings.EqualFold(a, b)
+		return strings.ToLower(p)
 	}
-	return a == b
+	return p
 }
 
 // hashCache avoids rehashing the same unchanged binary every poll tick.

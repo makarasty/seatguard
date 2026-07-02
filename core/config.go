@@ -17,6 +17,12 @@ type Paths struct {
 	State   string
 }
 
+// Args returns the four location flags in CLI form, so callers that spawn or
+// re-invoke seatguard don't hand-build (and risk desyncing) the slice.
+func (p Paths) Args() []string {
+	return []string{"--db", p.DB, "--key", p.Key, "--journal", p.Journal, "--state", p.State}
+}
+
 // DefaultPaths returns per-OS privileged locations.
 func DefaultPaths() Paths {
 	switch runtime.GOOS {

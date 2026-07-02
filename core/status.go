@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"seatguard/platform"
 )
 
 // Severity of a single posture check.
@@ -86,7 +87,6 @@ type Posture struct {
 // (Unprotected). A non-nil error means the paths themselves are unusable.
 func ComputePosture(paths Paths) *Posture {
 	p := &Posture{GeneratedAt: time.Now()}
-	hc := newHashCache()
 
 	key, keyErr := LoadKey(paths.Key)
 	if keyErr != nil {
@@ -97,7 +97,10 @@ func ComputePosture(paths Paths) *Posture {
 	}
 
 	// --- Integrity: baseline HMAC, journal chain, daemon self-hash ---
-	baseline, bErr := LoadBaseline(paths.DB, key)
+	// All three are cached so a 1.5s dashboard refresh doesn't re-read+re-MAC
+	// the DB and whole journal or re-hash the daemon's own 3+ MB binary every
+	// frame (see the cache helpers below).
+	baseline, bErr := cachedBaseline(paths, key)
 	integrityOK := true
 	if bErr != nil {
 		p.add("Baseline integrity", SevFail, "HMAC invalid — database modified outside seatguard")
@@ -107,19 +110,16 @@ func ComputePosture(paths Paths) *Posture {
 		p.Identities = len(baseline.Identities)
 	}
 
-	entries, jErr := VerifyJournal(paths.Journal, key)
-	if jErr != nil {
+	jstat := cachedJournalStat(paths, key)
+	if jstat.err != nil {
 		p.add("Journal chain", SevFail, "hash chain broken — a record was rewritten")
 		integrityOK = false
 	} else {
-		p.add("Journal chain", SevOK, fmt.Sprintf("append-only chain intact (%d records)", len(entries)))
+		p.add("Journal chain", SevOK, fmt.Sprintf("append-only chain intact (%d records)", jstat.records))
 	}
 
-	if self, err := os.Executable(); err == nil && baseline != nil {
-		if resolved, rerr := filepath.EvalSymlinks(self); rerr == nil {
-			self = resolved
-		}
-		if h, _, herr := HashFile(self); herr == nil {
+	if baseline != nil {
+		if h, herr := cachedSelfHash(); herr == nil {
 			if baseline.DaemonHash != "" && h != baseline.DaemonHash {
 				p.add("Daemon self-check", SevFail, "seatguard binary hash differs from enrolled")
 				integrityOK = false
@@ -131,8 +131,8 @@ func ComputePosture(paths Paths) *Posture {
 	p.IntegrityOK = integrityOK
 
 	// --- Daemon liveness ---
-	if st, err := readState(paths.State); err == nil {
-		p.Running = time.Since(st.LastPoll) < time.Duration(maxInt(st.PollSecs, 1)*10)*time.Second
+	if st, err := ReadDaemonState(paths.State); err == nil {
+		p.Running = st.Running()
 		p.StartedAt, p.LastPoll = st.StartedAt, st.LastPoll
 		p.Polls, p.PollSecs = st.Polls, st.PollSecs
 		if p.Running {
@@ -147,34 +147,22 @@ func ComputePosture(paths Paths) *Posture {
 
 	// --- Credential coverage ---
 	if baseline != nil {
-		present, missing := 0, 0
+		present := 0
 		for _, c := range baseline.CredPaths {
 			if _, err := os.Stat(c); err == nil {
 				present++
-			} else {
-				missing++
 			}
 		}
-		switch {
-		case present == 0:
+		if present == 0 {
 			p.add("Credential watch", SevWarn, "no credential files found on disk yet")
-		default:
+		} else {
 			p.add("Credential watch", SevOK, fmt.Sprintf("%d credential file(s) watched", present))
 		}
 	}
 
-	// --- Alerts ---
-	for i := range entries {
-		if entries[i].Type != "alert" {
-			continue
-		}
-		p.Alerts++
-		var a Alert
-		if json.Unmarshal(entries[i].Data, &a) == nil {
-			ac := a
-			p.LastAlert = &ac
-		}
-	}
+	// --- Alerts (from the cached journal scan) ---
+	p.Alerts = jstat.alertCount
+	p.LastAlert = jstat.lastAlert
 	if p.Alerts > 0 {
 		det := fmt.Sprintf("%d detection alert(s) recorded", p.Alerts)
 		if p.LastAlert != nil {
@@ -185,12 +173,30 @@ func ComputePosture(paths Paths) *Posture {
 		p.add("Detections", SevOK, "no unauthorized access detected")
 	}
 
+	// --- Privilege / DB location (tamper-evidence assumptions) ---
+	// The DB must be owned by a privileged account and live outside the
+	// user's home for tamper-evidence to mean anything. We can't enforce
+	// ownership without breaking unprivileged dev use, so we surface it.
+	priv := platform.IsPrivileged()
+	home, _ := os.UserHomeDir()
+	dbInHome := home != "" && strings.HasPrefix(NormPath(paths.DB), NormPath(home))
+	switch {
+	case !priv && dbInHome:
+		p.add("Privilege", SevWarn, "unprivileged and DB under your home — anyone as you can replace it; run elevated with the default DB path")
+	case !priv:
+		p.add("Privilege", SevWarn, "running unprivileged — DB/journal not owner-protected; run elevated for full tamper-evidence")
+	case dbInHome:
+		p.add("Privilege", SevWarn, "DB is under your home directory — use the default (privileged) location")
+	default:
+		p.add("Privilege", SevOK, "privileged; DB outside home directory")
+	}
+
 	// --- Coverage gaps: unenrolled Claude installs & stale binaries ---
 	// These two checks are expensive (DiscoverInstalls may spawn the OS
 	// package manager; freshness re-hashes every enrolled binary), so the
 	// result is cached: a 1.5s dashboard refresh must not re-scan the disk.
 	if baseline != nil {
-		unenrolled, stale := coverage(baseline, hc)
+		unenrolled, stale := coverage(baseline)
 		p.UnenrolledInstalls, p.StaleBinaries = unenrolled, stale
 		if n := len(unenrolled); n > 0 {
 			p.add("Install coverage", SevWarn, fmt.Sprintf("%d Claude binary(ies) on disk not enrolled — will look foreign", n))
@@ -218,7 +224,11 @@ var (
 	covStale      []string
 )
 
-func coverage(baseline *Baseline, hc *hashCache) (unenrolled, stale []string) {
+// covHash persists across coverage() calls so the once-per-30s freshness
+// re-hash of enrolled binaries is stat-only after the first pass.
+var covHash = newHashCache()
+
+func coverage(baseline *Baseline) (unenrolled, stale []string) {
 	covMu.Lock()
 	defer covMu.Unlock()
 	if !covAt.IsZero() && time.Since(covAt) < 30*time.Second {
@@ -227,17 +237,17 @@ func coverage(baseline *Baseline, hc *hashCache) (unenrolled, stale []string) {
 
 	enrolled := map[string]bool{}
 	for _, id := range baseline.Identities {
-		enrolled[normPath(id.Path)] = true
+		enrolled[NormPath(id.Path)] = true
 	}
 	var un []string
 	for _, f := range DiscoverInstalls() {
-		if !enrolled[normPath(f.Path)] {
+		if !enrolled[NormPath(f.Path)] {
 			un = append(un, f.Path)
 		}
 	}
 	var st []string
 	for _, id := range baseline.Identities {
-		h, err := hc.Hash(id.Path)
+		h, err := covHash.Hash(id.Path)
 		if err != nil {
 			st = append(st, id.Path+" (missing)")
 			continue
@@ -248,6 +258,112 @@ func coverage(baseline *Baseline, hc *hashCache) (unenrolled, stale []string) {
 	}
 	covUnenrolled, covStale, covAt = un, st, time.Now()
 	return un, st
+}
+
+// --- hot-path caches for the live viewers ---------------------------------
+//
+// The dashboard (1.5s) and tray (3s) call ComputePosture continuously. These
+// caches turn the per-frame cost from "re-read+re-MAC the DB and the whole
+// journal, and re-hash the daemon's own binary" into a few os.Stat calls when
+// nothing changed. The authoritative full checks still run in `seatguard
+// verify` and at daemon startup.
+
+var (
+	postureMu sync.Mutex
+
+	selfHashVal, selfHashKey string
+
+	blVal *Baseline
+	blErr error
+	blKey string
+
+	jrnlStatCache journalStat
+	jrnlKey       int64 = -1
+)
+
+// fileKey is a cheap change token: modtime + size. Empty on stat error.
+func fileKey(path string) string {
+	st, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%d|%d", st.ModTime().UnixNano(), st.Size())
+}
+
+// cachedSelfHash hashes the daemon's own binary once per process. The running
+// executable cannot change on disk without changing its modtime/size, so
+// after the first call this is a single os.Stat.
+func cachedSelfHash() (string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if resolved, rerr := filepath.EvalSymlinks(self); rerr == nil {
+		self = resolved
+	}
+	k := fileKey(self)
+	postureMu.Lock()
+	defer postureMu.Unlock()
+	if k != "" && k == selfHashKey && selfHashVal != "" {
+		return selfHashVal, nil
+	}
+	h, _, herr := HashFile(self)
+	if herr != nil {
+		return "", herr
+	}
+	selfHashVal, selfHashKey = h, k
+	return h, nil
+}
+
+// cachedBaseline re-loads+re-verifies the DB only when its modtime/size change.
+func cachedBaseline(paths Paths, key []byte) (*Baseline, error) {
+	k := fileKey(paths.DB)
+	postureMu.Lock()
+	defer postureMu.Unlock()
+	if k != "" && k == blKey && (blVal != nil || blErr != nil) {
+		return blVal, blErr
+	}
+	b, err := LoadBaseline(paths.DB, key)
+	blVal, blErr, blKey = b, err, k
+	return b, err
+}
+
+type journalStat struct {
+	records    int
+	alertCount int
+	lastAlert  *Alert
+	err        error
+}
+
+// cachedJournalStat re-verifies the journal only when its size changes. The
+// journal grows only when the daemon appends a record, so between events this
+// is a single os.Stat. (A same-size mid-file rewrite is still caught by
+// `seatguard verify` and at startup — the authoritative full checks.)
+func cachedJournalStat(paths Paths, key []byte) journalStat {
+	var size int64 = -1
+	if st, err := os.Stat(paths.Journal); err == nil {
+		size = st.Size()
+	}
+	postureMu.Lock()
+	defer postureMu.Unlock()
+	if size >= 0 && size == jrnlKey {
+		return jrnlStatCache
+	}
+	entries, verr := VerifyJournal(paths.Journal, key)
+	js := journalStat{records: len(entries), err: verr}
+	for i := range entries {
+		if entries[i].Type != "alert" {
+			continue
+		}
+		js.alertCount++
+		var a Alert
+		if json.Unmarshal(entries[i].Data, &a) == nil {
+			ac := a
+			js.lastAlert = &ac
+		}
+	}
+	jrnlStatCache, jrnlKey = js, size
+	return js
 }
 
 func (p *Posture) add(name string, sev Severity, detail string) {
@@ -283,38 +399,4 @@ func (p *Posture) finalize() {
 	default:
 		p.Level = LevelProtected
 	}
-}
-
-// stateSnapshot mirrors the daemon's state.json.
-type stateSnapshot struct {
-	PID       int       `json:"pid"`
-	StartedAt time.Time `json:"started_at"`
-	LastPoll  time.Time `json:"last_poll"`
-	Polls     uint64    `json:"polls"`
-	Alerts    uint64    `json:"alert_count"`
-	PollSecs  int       `json:"poll_secs"`
-}
-
-func readState(path string) (stateSnapshot, error) {
-	var st stateSnapshot
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return st, err
-	}
-	return st, json.Unmarshal(raw, &st)
-}
-
-func normPath(p string) string {
-	c := filepath.Clean(p)
-	if runtime.GOOS == "windows" {
-		return strings.ToLower(c)
-	}
-	return c
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

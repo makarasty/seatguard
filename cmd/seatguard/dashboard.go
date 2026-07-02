@@ -129,13 +129,6 @@ func alertColor(n int) string {
 	return cGreen
 }
 
-const (
-	clearHome = "\x1b[H\x1b[2J"
-	cursorTop = "\x1b[H\x1b[0J"
-	hideCur   = "\x1b[?25l"
-	showCur   = "\x1b[?25h"
-)
-
 // cmdDashboard renders a live, auto-refreshing security dashboard for the
 // current baseline/daemon. Read-only except for the [u]pdate and [v]erify
 // hotkeys. Attaches to whatever `run` daemon is writing the state file.
@@ -156,15 +149,15 @@ func cmdDashboard(args []string) error {
 		}
 	}()
 
-	fmt.Print(hideCur, clearHome)
-	defer fmt.Print(showCur, "\n")
+	fmt.Print(curHide, scrClear)
+	defer fmt.Print(curShow, "\n")
 
 	ticker := time.NewTicker(*every)
 	defer ticker.Stop()
 	tick := 0
 	draw := func() {
 		p := core.ComputePosture(*paths)
-		fmt.Print(cursorTop, renderPosture(p, tick))
+		fmt.Print(cursorHome, renderPosture(p, tick))
 		tick++
 	}
 	draw()
@@ -189,28 +182,28 @@ func cmdDashboard(args []string) error {
 			case 'q':
 				return nil
 			case 'v':
-				fmt.Print(clearHome)
+				fmt.Print(scrClear)
 				fmt.Printf("%sRe-verifying integrity...%s\n\n", cBold, cReset)
 				core.VerifyAll(*paths, os.Stdout)
 				fmt.Printf("\n%spress any key to return%s", cDim, cReset)
 				<-keys
-				fmt.Print(clearHome)
+				fmt.Print(scrClear)
 				draw()
 			case 'u':
-				fmt.Print(clearHome)
+				fmt.Print(scrClear)
 				if err := updateBaseline(*paths); err != nil {
 					fmt.Printf("%supdate failed: %v%s\n", cRed, err, cReset)
 				}
 				fmt.Printf("\n%spress any key to return%s", cDim, cReset)
 				<-keys
-				fmt.Print(clearHome)
+				fmt.Print(scrClear)
 				draw()
 			case 'l':
-				fmt.Print(clearHome, showCur)
+				fmt.Print(scrClear, curShow)
 				printRecentLog(*paths, 20)
 				fmt.Printf("\n%spress any key to return%s", cDim, cReset)
 				<-keys
-				fmt.Print(hideCur, clearHome)
+				fmt.Print(curHide, scrClear)
 				draw()
 			}
 		}
