@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -48,7 +49,7 @@ func LoadKey(path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read key: %w", err)
 	}
-	key, err := hex.DecodeString(string(trimSpace(raw)))
+	key, err := hex.DecodeString(string(bytes.TrimRight(raw, "\r\n ")))
 	if err != nil || len(key) != 32 {
 		return nil, fmt.Errorf("malformed key file %s", path)
 	}
@@ -72,13 +73,6 @@ func EnsureKey(path string) ([]byte, error) {
 		platform.HardenFile(path) // best effort — HMAC is the primary guard
 	}
 	return LoadKey(path)
-}
-
-func trimSpace(b []byte) []byte {
-	for len(b) > 0 && (b[len(b)-1] == '\n' || b[len(b)-1] == '\r' || b[len(b)-1] == ' ') {
-		b = b[:len(b)-1]
-	}
-	return b
 }
 
 func dbMAC(key, payload []byte) string {

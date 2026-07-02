@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -149,7 +150,7 @@ func parseProcNetTCP(file string, v6 bool) ([]tcpEntry, error) {
 
 // hexToIP decodes the kernel's little-endian-per-word hex address format.
 func hexToIP(h string, v6 bool) (net.IP, error) {
-	raw, err := hexDecode(h)
+	raw, err := hex.DecodeString(h)
 	if err != nil {
 		return nil, err
 	}
@@ -169,21 +170,6 @@ func hexToIP(h string, v6 bool) (net.IP, error) {
 		binary.BigEndian.PutUint32(ip[i*4:i*4+4], w)
 	}
 	return ip, nil
-}
-
-func hexDecode(s string) ([]byte, error) {
-	if len(s)%2 != 0 {
-		return nil, fmt.Errorf("odd hex")
-	}
-	out := make([]byte, len(s)/2)
-	for i := 0; i < len(out); i++ {
-		v, err := strconv.ParseUint(s[i*2:i*2+2], 16, 8)
-		if err != nil {
-			return nil, err
-		}
-		out[i] = byte(v)
-	}
-	return out, nil
 }
 
 func (b *linuxBackend) EstablishedTo(remoteIPs map[string]struct{}) ([]ConnInfo, error) {
