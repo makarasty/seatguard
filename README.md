@@ -101,7 +101,8 @@ seatguard/
 - Snapshot every 3–5 s (default 4 s, `--poll`).
 - Signal A: which process holds a credential file open. Signal B: which process has an established TCP connection to an Anthropic endpoint IP (domains resolved at runtime and refreshed every 5 min — Cloudflare rotates IPs; never hardcoded). Only connection metadata is used — no TLS interception, no MITM.
 - Identity = binary path + content hash + captured code signature; (pid, start_time) used only as a stable runtime handle. The content hash is the *enforced* check; the signature (Authenticode CN on Windows, `codesign` Authority on macOS) is captured at enroll as supplementary attribution. Deduplication: exactly one alert per (signal, pid, start_time).
-- Self-protection is tamper-EVIDENT, not tamper-proof: DB 0600 outside home dir, HMAC key stored separately, hash-chained append-only journal, daemon refuses to start on any integrity mismatch. The token itself is never stored — only metadata and hashes.
+- Self-protection is tamper-EVIDENT, not tamper-proof: the DB, HMAC key, journal and state file are all `0600` (a protected DACL on Windows), outside the home dir, with the key kept in a separate directory from the DB; the journal is an append-only per-record HMAC chain; the daemon refuses to start on any integrity mismatch. The token itself is never stored — only metadata and hashes.
+- The privileged-owner assumption is surfaced, not silently trusted: `run` prints a warning and the dashboard shows a `Privilege` check when seatguard runs unprivileged or the DB sits under your home directory (either weakens the owner boundary tamper-evidence relies on). It does not hard-fail, so unprivileged/dev use still works.
 
 ## Known boundaries (by design, not detected)
 
@@ -125,4 +126,5 @@ The Linux and Windows backends are exercised end-to-end by the acceptance harnes
 - **Usage correlation** — tie observed egress to token-usage spikes.
 - **macOS hardware validation** of the `proc_info(2)` backend (see above).
 - **Signature enforcement** — optionally require a valid signature match, not just capture it as metadata.
-- **Privileged service install** — run as a system service under a dedicated account with the DB/key owned by that account.
+- **Privileged service install** — run as a system service under a dedicated account with the DB/key owned by that account (and enforce that ownership, which is currently only warned about).
+- **Journal rotation** — the append-only journal grows without bound; add size-capped rotation so long-running daemons don't accumulate an ever-larger file (live readers are already O(1) when it hasn't changed, but `verify`/`log` still read it whole).
