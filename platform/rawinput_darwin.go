@@ -25,3 +25,10 @@ func RawInput() (restore func(), ok bool) {
 	}
 	return func() { unix.IoctlSetTermios(fd, unix.TIOCSETA, old) }, true
 }
+
+// isTTY reports whether fd is a terminal (the termios ioctl only succeeds on
+// a real tty, not on /dev/null, pipes or files).
+func isTTY(fd int) bool {
+	_, err := unix.IoctlGetTermios(fd, unix.TIOCGETA)
+	return err == nil
+}

@@ -50,9 +50,10 @@ func Enroll(paths Paths, be platform.Backend, opts EnrollOptions) (*Baseline, er
 		if err != nil {
 			return err
 		}
-		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-			abs = resolved
-		}
+		// Canonicalize (resolve symlinks + expand 8.3 short names on Windows)
+		// so the enrolled path matches exactly what the process backend
+		// reports at runtime — otherwise the same binary looks foreign.
+		abs = platform.CanonPath(abs)
 		if seen[abs] {
 			return nil
 		}

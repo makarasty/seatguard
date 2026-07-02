@@ -4,22 +4,18 @@ package platform
 
 import "os"
 
-// EnableANSI reports whether stdout likely supports ANSI colors. POSIX
-// terminals do; pipes do not.
+// EnableANSI reports whether stdout is a real terminal (so ANSI colors and
+// cursor control are appropriate). Pipes, files and /dev/null are not.
 func EnableANSI() bool {
-	return isCharDevice(os.Stdout)
+	return isTTY(int(os.Stdout.Fd()))
 }
 
-// StdinInteractive reports whether stdin is a terminal (not piped/redirected
-// or a service context).
+// StdinInteractive reports whether stdin is a real terminal. It must use a
+// true tty check (not merely "is a character device"): a service or the
+// acceptance harness launches the daemon with stdin = /dev/null, which IS a
+// character device — treating that as interactive would start the keyboard
+// watcher, which then reads EOF, mistakes it for Esc, and stops the daemon
+// immediately. isTTY is defined per-OS (different termios ioctl).
 func StdinInteractive() bool {
-	return isCharDevice(os.Stdin)
-}
-
-func isCharDevice(f *os.File) bool {
-	st, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return st.Mode()&os.ModeCharDevice != 0
+	return isTTY(int(os.Stdin.Fd()))
 }

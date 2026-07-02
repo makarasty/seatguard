@@ -220,6 +220,12 @@ func (h *harness) checkBuild() {
 		fmt.Fprintln(os.Stderr, "build failures:\n"+strings.Join(fails, "\n"))
 		os.Exit(h.report())
 	}
+	// Canonicalize the just-built binary paths (expand 8.3 short names /
+	// resolve symlinks) so our attribution assertions compare against the
+	// same canonical form the daemon's backend reports.
+	h.claudeBin = platform.CanonPath(h.claudeBin)
+	h.rogueBin = platform.CanonPath(h.rogueBin)
+	h.nodeBin = platform.CanonPath(h.nodeBin)
 	h.pass(1, "cross-target static build", "linux/amd64, darwin/arm64, windows/amd64 with CGO_ENABLED=0")
 }
 

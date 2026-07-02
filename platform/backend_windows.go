@@ -157,7 +157,9 @@ func queryProcess(pid uint32) (ProcessInfo, error) {
 	return ProcessInfo{
 		PID:       pid,
 		StartTime: filetimeToInt64(creation),
-		ExePath:   windows.UTF16ToString(buf[:size]),
+		// Canonicalize (expand 8.3 short names) so the path compares equal to
+		// the enrolled one regardless of how the process was launched.
+		ExePath: CanonPath(windows.UTF16ToString(buf[:size])),
 	}, nil
 }
 
