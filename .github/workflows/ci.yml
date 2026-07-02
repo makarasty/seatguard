@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # Build, vet, unit-test AND run the full §6 acceptance harness on each OS.
+  # The harness exercises the host's platform backend end-to-end, so this is
+  # what actually validates the Linux and macOS detection paths at runtime.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: Vet
+        run: go vet ./...
+      - name: Unit tests
+        run: go test ./core/...
+      # macOS only wires up 127.0.0.1 by default; the harness's stub Anthropic
+      # endpoint lives on a dedicated loopback alias, so add it there.
+      - name: Add loopback alias (macOS)
+        if: runner.os == 'macOS'
+        run: sudo ifconfig lo0 alias 127.209.31.7 up
+      - name: Acceptance harness (§6)
+        run: go run ./cmd/harness
+
+  # Produce static release binaries for all three targets.
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64, ext: "" }
+          - { goos: darwin, goarch: arm64, ext: "" }
+          - { goos: windows, goarch: amd64, ext: ".exe" }
+    env:
+      CGO_ENABLED: "0"
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: Build
+        run: go build -trimpath -ldflags "-s -w" -o dist/seatguard-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} ./cmd/seatguard
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seatguard-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*

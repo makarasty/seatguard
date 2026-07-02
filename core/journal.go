@@ -42,6 +42,18 @@ func entryMAC(key []byte, prevMAC string, e *Entry) string {
 	return hex.EncodeToString(m.Sum(nil))
 }
 
+// defaultJournalMax bounds the live journal file; when exceeded it rotates
+// (one archive kept), so a long-running daemon doesn't grow it without limit.
+const defaultJournalMax = 4 << 20 // 4 MiB
+
+// rotationAnchor is the payload of the "rotated" genesis record that starts a
+// fresh journal segment and links it to the archived tail's chain.
+type rotationAnchor struct {
+	PrevSeq uint64 `json:"prev_seq"`
+	PrevMAC string `json:"prev_mac"`
+	Archive string `json:"archive"`
+}
+
 // Journal is an append-only, hash-chained event log.
 type Journal struct {
 	mu       sync.Mutex
@@ -50,7 +62,11 @@ type Journal struct {
 	lastSeq  uint64
 	lastMAC  string
 	hardened bool
+	maxBytes int64
 }
+
+// SetMaxBytes overrides the rotation threshold (0 disables rotation).
+func (j *Journal) SetMaxBytes(n int64) { j.maxBytes = n }
 
 // OpenJournal opens (creating if needed) the journal and loads chain state.
 // It does NOT fully verify on open; use Verify for that.
@@ -58,7 +74,7 @@ func OpenJournal(path string, key []byte) (*Journal, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	j := &Journal{path: path, key: key}
+	j := &Journal{path: path, key: key, maxBytes: defaultJournalMax}
 	entries, err := readEntries(path)
 	if err != nil {
 		return nil, err
@@ -110,6 +126,14 @@ func (j *Journal) Append(typ string, data any) error {
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
+
+	// Rotate before appending when the file has grown past the cap.
+	if j.maxBytes > 0 && j.lastSeq > 0 {
+		if st, serr := os.Stat(j.path); serr == nil && st.Size() >= j.maxBytes {
+			j.rotate() // best effort; on failure we keep appending to the current file
+		}
+	}
+
 	e := Entry{
 		Seq:  j.lastSeq + 1,
 		TS:   time.Now().UTC().Format(time.RFC3339Nano),
@@ -138,7 +162,35 @@ func (j *Journal) Append(typ string, data any) error {
 	return nil
 }
 
-// VerifyJournal re-walks the whole chain. Returns the entries and an
+// rotate archives the current journal and starts a fresh segment with a
+// "rotated" genesis record whose MAC chains from the archived tail — so the
+// new file is independently verifiable yet cryptographically linked to the
+// history it replaced. One archive ("<journal>.1") is kept. Caller holds mu.
+func (j *Journal) rotate() {
+	archive := j.path + ".1"
+	os.Remove(archive) // Windows os.Rename won't overwrite an existing file
+	if err := os.Rename(j.path, archive); err != nil {
+		return // keep appending to the current file
+	}
+	anchor, _ := json.Marshal(rotationAnchor{PrevSeq: j.lastSeq, PrevMAC: j.lastMAC, Archive: filepath.Base(archive)})
+	g := Entry{Seq: 1, TS: time.Now().UTC().Format(time.RFC3339Nano), Type: "rotated", Data: anchor}
+	g.MAC = entryMAC(j.key, j.lastMAC, &g)
+	line, _ := json.Marshal(&g)
+	f, err := os.OpenFile(j.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	f.Write(append(line, '\n'))
+	f.Close()
+	platform.HardenFile(j.path)
+	j.hardened = true
+	j.lastSeq = g.Seq
+	j.lastMAC = g.MAC
+}
+
+// VerifyJournal re-walks the chain of the current journal segment. A
+// "rotated" genesis record seeds the chain from the archived tail's MAC, so a
+// rotated journal still verifies. Returns the entries and an
 // ErrIntegrity-wrapped error pointing at the first broken record.
 func VerifyJournal(path string, key []byte) ([]Entry, error) {
 	entries, err := readEntries(path)
@@ -148,6 +200,12 @@ func VerifyJournal(path string, key []byte) ([]Entry, error) {
 	prevMAC := ""
 	for i := range entries {
 		e := &entries[i]
+		if i == 0 && e.Type == "rotated" {
+			var a rotationAnchor
+			if json.Unmarshal(e.Data, &a) == nil {
+				prevMAC = a.PrevMAC // seed from the archived segment's tail
+			}
+		}
 		if e.Seq != uint64(i+1) {
 			return entries, fmt.Errorf("%w: journal chain break at record %d — sequence gap (got seq %d)", ErrIntegrity, i+1, e.Seq)
 		}

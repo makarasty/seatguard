@@ -134,6 +134,7 @@ func cmdRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	paths := pathFlags(fs)
 	tray := fs.Bool("tray", false, "run hidden in the system tray (Windows)")
+	requirePriv := fs.Bool("require-privileged", false, "refuse to start unless running elevated (Administrator/root)")
 	fs.Parse(args)
 
 	// Fail-safe startup: refuse to run on any integrity mismatch, loudly.
@@ -143,7 +144,23 @@ func cmdRun(args []string) error {
 		os.Exit(2)
 	}
 	if !platform.IsPrivileged() {
+		if *requirePriv {
+			fmt.Fprintln(os.Stderr, "seatguard: --require-privileged set but not running elevated; refusing to start")
+			os.Exit(5)
+		}
 		fmt.Fprintln(os.Stderr, "WARNING: running unprivileged — the baseline/key/journal are not owner-protected, so tamper-evidence is weakened. Run elevated (Administrator/root) with the default paths for full protection.")
+	}
+
+	// Single-instance: two daemons on one baseline would race the state file
+	// and corrupt the journal's HMAC chain. Refuse the second.
+	unlock, acquired, lerr := platform.Lock(paths.DB)
+	if lerr != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not acquire instance lock (%v); continuing\n", lerr)
+	} else if !acquired {
+		fmt.Fprintln(os.Stderr, "seatguard is already running for this baseline; not starting a second instance")
+		os.Exit(4)
+	} else {
+		defer unlock()
 	}
 
 	eng := &core.Engine{
