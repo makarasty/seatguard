@@ -4,7 +4,7 @@ package platform
 
 import (
 	"errors"
-	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -31,6 +31,7 @@ type TrayInfo struct {
 	Tooltip    string
 	AlertCount int
 	AlertText  string
+	Summary    string // multi-line posture detail, shown in the status box
 }
 
 var (
@@ -60,6 +61,7 @@ var (
 	procShellNotifyIcon = shell32.NewProc("Shell_NotifyIconW")
 	procCreateIcon      = user32.NewProc("CreateIcon")
 	procDestroyIcon     = user32.NewProc("DestroyIcon")
+	procMessageBox      = user32.NewProc("MessageBoxW")
 
 	procGetConsoleWindow = kernel32.NewProc("GetConsoleWindow")
 	procShowWindow       = user32.NewProc("ShowWindow")
@@ -67,15 +69,15 @@ var (
 )
 
 const (
-	wmDestroy   = 0x0002
-	wmCommand   = 0x0111
-	wmTimer     = 0x0113
-	wmApp       = 0x8000
-	wmTrayCB    = wmApp + 1
-	wmUserQuit  = wmApp + 2
-	wmRButtonUp = 0x0205
-	wmLButtonUp = 0x0202
-	wmLDblClk   = 0x0203
+	wmDestroy     = 0x0002
+	wmCommand     = 0x0111
+	wmTimer       = 0x0113
+	wmContextMenu = 0x007B
+	wmApp         = 0x8000
+	wmTrayCB      = wmApp + 1
+	wmUserQuit    = wmApp + 2
+	wmRButtonUp   = 0x0205
+	wmLDblClk     = 0x0203
 
 	nimAdd    = 0
 	nimModify = 1
@@ -92,11 +94,16 @@ const (
 	idiWarning     = 32515
 	idiInformation = 32516
 
-	tpmReturnCmd  = 0x0100
-	tpmRightAlign = 0x0008
-	swHide        = 0
-	mfString      = 0x0000
-	mfSeparator   = 0x0800
+	tpmReturnCmd   = 0x0100
+	tpmRightButton = 0x0002
+	swHide         = 0
+	mfString       = 0x0000
+	mfSeparator    = 0x0800
+	wmNull         = 0x0000
+
+	mbOK            = 0x0000
+	mbIconInfo      = 0x0040
+	mbSetForeground = 0x00010000
 
 	cmdOpen   = 1001
 	cmdStatus = 1002
@@ -402,11 +409,14 @@ func wndProc(hwnd windows.Handle, message uint32, wParam, lParam uintptr) uintpt
 	t := gTray
 	switch message {
 	case wmTrayCB:
+		// Right-click (or the Menu key) shows the context menu; double-click
+		// opens the dashboard. Single left-click is intentionally ignored so
+		// a double-click doesn't also pop the menu.
 		switch uint32(lParam) {
-		case wmRButtonUp, wmLButtonUp:
+		case wmRButtonUp, wmContextMenu:
 			t.showMenu()
 		case wmLDblClk:
-			t.spawnDashboard()
+			t.openDashboard()
 		}
 		return 0
 	case wmTimer:
@@ -463,10 +473,14 @@ func (t *tray) showMenu() {
 
 	var pt point
 	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
+	// SetForegroundWindow + the trailing WM_NULL post are the documented
+	// requirements for a tray context menu to receive and dismiss input
+	// correctly (without them the menu can ignore clicks or fail to close).
 	procSetForegroundWin.Call(uintptr(t.hwnd))
 	cmd, _, _ := procTrackPopupMenu.Call(
-		menu, tpmReturnCmd|tpmRightAlign,
+		menu, tpmReturnCmd|tpmRightButton,
 		uintptr(pt.x), uintptr(pt.y), 0, uintptr(t.hwnd), 0)
+	procPostMessage.Call(uintptr(t.hwnd), wmNull, 0, 0)
 	procDestroyMenu.Call(menu)
 	if cmd != 0 {
 		t.onCommand(uint32(cmd))
@@ -476,11 +490,11 @@ func (t *tray) showMenu() {
 func (t *tray) onCommand(id uint32) {
 	switch id {
 	case cmdOpen:
-		t.spawnDashboard()
+		t.openDashboard()
 	case cmdStatus:
-		t.spawnConsole([]string{"status"})
+		t.statusBox()
 	case cmdVerify:
-		t.spawnConsole([]string{"verify"})
+		t.openVerify()
 	case cmdQuit:
 		if t.onQuit != nil {
 			t.onQuit()
@@ -489,15 +503,75 @@ func (t *tray) onCommand(id uint32) {
 	}
 }
 
-func (t *tray) spawnDashboard() { t.spawnConsole(append([]string{"dashboard"}, t.dashArgs...)) }
+// openDashboard launches the interactive dashboard in a brand-new console.
+func (t *tray) openDashboard() {
+	newConsole(cmdLine(t.selfExe, append([]string{"dashboard"}, t.dashArgs...)))
+}
 
-// spawnConsole launches seatguard in a brand-new visible console window.
-func (t *tray) spawnConsole(args []string) {
-	const createNewConsole = 0x00000010
-	cmd := exec.Command(t.selfExe, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNewConsole}
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
-	_ = cmd.Start()
+// openVerify runs `seatguard verify` in a new console that stays open (cmd
+// /k) so the user can read the result.
+func (t *tray) openVerify() {
+	inner := cmdLine(t.selfExe, append([]string{"verify"}, t.dashArgs...))
+	newConsole(`cmd.exe /k ` + inner)
+}
+
+// newConsole starts a command line in a fresh, fully interactive console via
+// CreateProcess with CREATE_NEW_CONSOLE and NO std-handle redirection — the
+// child inherits the new console's real stdin/stdout (this is what
+// Start-Process does). os/exec cannot do this: it forces the child's std
+// handles to NUL, which makes an interactive child (the dashboard) read EOF
+// and exit instantly, and sends output nowhere.
+func newConsole(commandLine string) {
+	argv, err := windows.UTF16PtrFromString(commandLine)
+	if err != nil {
+		return
+	}
+	var si windows.StartupInfo
+	si.Cb = uint32(unsafe.Sizeof(si))
+	var pi windows.ProcessInformation
+	if err := windows.CreateProcess(nil, argv, nil, nil, false,
+		windows.CREATE_NEW_CONSOLE, nil, nil, &si, &pi); err != nil {
+		return
+	}
+	windows.CloseHandle(pi.Thread)
+	windows.CloseHandle(pi.Process)
+}
+
+// cmdLine builds a Windows command line from an exe and args, quoting tokens
+// that contain spaces.
+func cmdLine(exe string, args []string) string {
+	var b strings.Builder
+	b.WriteString(quoteArg(exe))
+	for _, a := range args {
+		b.WriteByte(' ')
+		b.WriteString(quoteArg(a))
+	}
+	return b.String()
+}
+
+// statusBox shows the current posture in a message box — instant and
+// reliable, with no console to flash. Runs on its own goroutine so the tray
+// message loop keeps pumping while the box is open.
+func (t *tray) statusBox() {
+	t.mu.Lock()
+	text := t.latest.Summary
+	if text == "" {
+		text = t.latest.Tooltip
+	}
+	t.mu.Unlock()
+	body, _ := windows.UTF16PtrFromString(text)
+	caption, _ := windows.UTF16PtrFromString("seatguard — security status")
+	go func() {
+		procMessageBox.Call(0, uintptr(unsafe.Pointer(body)), uintptr(unsafe.Pointer(caption)), mbOK|mbIconInfo|mbSetForeground)
+	}()
+}
+
+// quoteArg wraps an argument in double quotes for cmd.exe when needed.
+func quoteArg(s string) string {
+	if s == "" || strings.ContainsAny(s, " \t") {
+		return `"` + s + `"`
+	}
+	return s
 }
 
 func appendItem(menu uintptr, id uint32, text string) {

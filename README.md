@@ -39,7 +39,11 @@ CGO_ENABLED=0 go build -o seatguard ./cmd/seatguard
 ./seatguard            # or: ./seatguard setup
 ```
 
-The wizard is fully keyboard-driven (no typing paths, no Enter-per-line): an arrow-key **checklist** to pick which discovered Claude binaries are legitimate (`↑↓` move, `space` toggle, `a`/`n` all/none, `Enter` confirm), then an arrow-key **menu** to choose how to start — live dashboard, hidden in the **system tray** (Windows), foreground, or autostart. This is the recommended path; the individual commands below exist for scripting.
+The wizard is fully keyboard-driven (no typing paths, no Enter-per-line): an arrow-key **checklist** to pick which discovered Claude binaries are legitimate (`↑↓` move, `space` toggle, `a`/`n` all/none, `Enter` confirm), then an arrow-key **menu** to choose how to start — live dashboard, hidden in the **system tray** (Windows), foreground, or autostart. `Esc` or `q` exits any menu.
+
+**It remembers.** If a valid baseline already exists, the wizard doesn't re-ask everything — it shows a short menu (Start / Re-scan & update / Edit selection / Quit) and flags any drift (new Claude installs on disk, or enrolled binaries whose hash changed after an update). Pass `--reconfigure` to force the full selection.
+
+This is the recommended path; the individual commands below exist for scripting.
 
 ### Live security dashboard
 

@@ -193,6 +193,24 @@ func cmdRun(args []string) error {
 	return eng.Run(ctx)
 }
 
+// traySummary renders the posture as plain multi-line text for the tray's
+// status message box.
+func traySummary(p *core.Posture) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s   —   security score %d/100\n\n", p.Level, p.Score)
+	for _, c := range p.Checks {
+		mark := "OK  "
+		switch c.Status {
+		case core.SevWarn:
+			mark = "WARN"
+		case core.SevFail:
+			mark = "FAIL"
+		}
+		fmt.Fprintf(&b, "[%s] %s: %s\n", mark, c.Name, c.Detail)
+	}
+	return b.String()
+}
+
 // runInTray hides the console, runs the engine in the background, and shows
 // a system-tray icon whose color reflects the live security posture. On
 // non-Windows the tray call returns ErrTrayUnsupported and we fall back to
@@ -217,6 +235,7 @@ func runInTray(ctx context.Context, stop context.CancelFunc, eng *core.Engine, p
 			Level:      lvl,
 			Tooltip:    fmt.Sprintf("seatguard: %s (score %d/100)", p.Level, p.Score),
 			AlertCount: p.Alerts,
+			Summary:    traySummary(p),
 		}
 		if p.LastAlert != nil {
 			info.AlertText = fmt.Sprintf("%s accessed %s", p.LastAlert.ExePath, p.LastAlert.Target)

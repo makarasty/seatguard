@@ -18,6 +18,7 @@ type TrayInfo struct {
 	Tooltip    string
 	AlertCount int
 	AlertText  string
+	Summary    string
 }
 
 // ErrTrayUnsupported is returned by RunTray on non-Windows platforms.
