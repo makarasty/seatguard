@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"seatguard/platform"
@@ -72,62 +71,39 @@ type keyEvent struct {
 	r byte // set when k == keyChar
 }
 
-// keyReader turns raw stdin bytes into key events, decoding the CSI escape
-// sequences terminals send for arrow keys.
+// keyReader wraps the platform key source and maps its normalized keys to
+// the local keyEvent type. The per-OS decoding (Windows ReadConsoleInput vs
+// POSIX escape sequences) lives in the platform package.
 type keyReader struct {
-	in   *os.File
-	buf  [8]byte
-	raw  bool
-	rest func()
+	in platform.KeyInput
 }
 
 func newKeyReader() *keyReader {
-	restore, ok := platform.RawInput()
-	return &keyReader{in: os.Stdin, raw: ok, rest: restore}
+	return &keyReader{in: platform.NewKeyInput()}
 }
 
-func (kr *keyReader) close() {
-	if kr.rest != nil {
-		kr.rest()
-	}
-}
+func (kr *keyReader) close() { kr.in.Close() }
 
 // next blocks for one key event.
 func (kr *keyReader) next() keyEvent {
-	n, err := kr.in.Read(kr.buf[:1])
-	if err != nil || n == 0 {
-		return keyEvent{k: keyEsc}
-	}
-	b := kr.buf[0]
-	switch b {
-	case '\r', '\n':
-		return keyEvent{k: keyEnter}
-	case ' ':
-		return keyEvent{k: keySpace}
-	case 3, 4: // Ctrl-C, Ctrl-D
-		return keyEvent{k: keyEsc}
-	case 0x1b: // ESC or CSI sequence
-		return kr.decodeEscape()
-	}
-	return keyEvent{k: keyChar, r: b}
-}
-
-// decodeEscape reads the remainder of an escape sequence. A lone ESC (no
-// bytes queued) means the user pressed Escape.
-func (kr *keyReader) decodeEscape() keyEvent {
-	n, err := kr.in.Read(kr.buf[:2])
-	if err != nil || n < 2 || kr.buf[0] != '[' {
-		return keyEvent{k: keyEsc}
-	}
-	switch kr.buf[1] {
-	case 'A':
+	k, r := kr.in.Read()
+	switch k {
+	case platform.KeyUp:
 		return keyEvent{k: keyUp}
-	case 'B':
+	case platform.KeyDown:
 		return keyEvent{k: keyDown}
-	case 'C':
-		return keyEvent{k: keyRight}
-	case 'D':
+	case platform.KeyLeft:
 		return keyEvent{k: keyLeft}
+	case platform.KeyRight:
+		return keyEvent{k: keyRight}
+	case platform.KeyEnter:
+		return keyEvent{k: keyEnter}
+	case platform.KeySpace:
+		return keyEvent{k: keySpace}
+	case platform.KeyEsc:
+		return keyEvent{k: keyEsc}
+	case platform.KeyRune:
+		return keyEvent{k: keyChar, r: r}
 	}
 	return keyEvent{k: keyNone}
 }

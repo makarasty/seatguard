@@ -146,21 +146,15 @@ func cmdDashboard(args []string) error {
 	fs.Parse(args)
 
 	initColors()
-	restore, raw := platform.RawInput()
-	defer restore()
+	kr := newKeyReader()
+	defer kr.close()
 
-	keys := make(chan byte, 8)
-	if raw {
-		go func() {
-			buf := make([]byte, 1)
-			for {
-				if n, err := os.Stdin.Read(buf); err != nil || n == 0 {
-					return
-				}
-				keys <- buf[0]
-			}
-		}()
-	}
+	keys := make(chan keyEvent, 8)
+	go func() {
+		for {
+			keys <- kr.next()
+		}
+	}()
 
 	fmt.Print(hideCur, clearHome)
 	defer fmt.Print(showCur, "\n")
@@ -175,15 +169,26 @@ func cmdDashboard(args []string) error {
 	}
 	draw()
 
+	// hotkey extracts a lowercase command letter from a key event.
+	hotkey := func(ev keyEvent) byte {
+		if ev.k == keyChar {
+			return lower(ev.r)
+		}
+		if ev.k == keyEsc {
+			return 'q'
+		}
+		return 0
+	}
+
 	for {
 		select {
 		case <-ticker.C:
 			draw()
-		case k := <-keys:
-			switch k {
-			case 'q', 'Q', 3 /*Ctrl-C*/ :
+		case ev := <-keys:
+			switch hotkey(ev) {
+			case 'q':
 				return nil
-			case 'v', 'V':
+			case 'v':
 				fmt.Print(clearHome)
 				fmt.Printf("%sRe-verifying integrity...%s\n\n", cBold, cReset)
 				core.VerifyAll(*paths, os.Stdout)
@@ -191,7 +196,7 @@ func cmdDashboard(args []string) error {
 				<-keys
 				fmt.Print(clearHome)
 				draw()
-			case 'u', 'U':
+			case 'u':
 				fmt.Print(clearHome)
 				if err := updateBaseline(*paths); err != nil {
 					fmt.Printf("%supdate failed: %v%s\n", cRed, err, cReset)
@@ -200,7 +205,7 @@ func cmdDashboard(args []string) error {
 				<-keys
 				fmt.Print(clearHome)
 				draw()
-			case 'l', 'L':
+			case 'l':
 				fmt.Print(clearHome, showCur)
 				printRecentLog(*paths, 20)
 				fmt.Printf("\n%spress any key to return%s", cDim, cReset)
