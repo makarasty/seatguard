@@ -78,14 +78,22 @@ type keyEvent struct {
 // the local keyEvent type. The per-OS decoding (Windows ReadConsoleInput vs
 // POSIX escape sequences) lives in the platform package.
 type keyReader struct {
-	in platform.KeyInput
+	in     platform.KeyInput
+	closed bool
 }
 
 func newKeyReader() *keyReader {
 	return &keyReader{in: platform.NewKeyInput()}
 }
 
-func (kr *keyReader) close() { kr.in.Close() }
+// close is idempotent: callers may close explicitly before handing the
+// console to another reader and still rely on a deferred close.
+func (kr *keyReader) close() {
+	if !kr.closed {
+		kr.in.Close()
+		kr.closed = true
+	}
+}
 
 // next blocks for one key event.
 func (kr *keyReader) next() keyEvent {

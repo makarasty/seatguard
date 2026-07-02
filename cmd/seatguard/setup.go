@@ -103,18 +103,22 @@ func cmdSetup(args []string) error {
 	}
 	choice := runMenu(kr, "Start protection", "seatguard is enrolled — choose how to run it", menu)
 	fmt.Print(scrClear, curShow)
+	// Restore the console (line mode, echo, Ctrl+C-as-signal) BEFORE handing
+	// off: the next command opens its own key source, and a foreground `run`
+	// needs Ctrl+C to work. Without this the wizard's raw mode would linger.
+	kr.close()
 	switch choice {
 	case 0: // dashboard
 		if err := startBackgroundDaemon(commonFlags); err != nil {
 			fmt.Printf("%scould not start background daemon: %v%s\n", cYell, err, cReset)
-			fmt.Println("Falling back to foreground run (Ctrl+C to stop).")
+			fmt.Println("Falling back to foreground run (Esc or Ctrl+C to stop).")
 			return cmdRun(commonFlags)
 		}
 		return cmdDashboard(commonFlags)
 	case 1: // tray
 		return cmdRun(append(commonFlags, "--tray"))
 	case 2: // foreground
-		fmt.Printf("\n%sRunning. Alerts appear below. Ctrl+C to stop.%s\n", cBold, cReset)
+		fmt.Printf("\n%sRunning. Alerts appear below. Esc or Ctrl+C to stop.%s\n", cBold, cReset)
 		return cmdRun(commonFlags)
 	case 3: // autostart
 		return installAutostart(*paths)

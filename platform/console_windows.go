@@ -18,3 +18,11 @@ func EnableANSI() bool {
 	}
 	return true
 }
+
+// StdinInteractive reports whether stdin is a real console (not piped,
+// redirected, or a detached/service context). Callers use this to decide
+// whether to watch the keyboard for an interactive quit key.
+func StdinInteractive() bool {
+	var mode uint32
+	return windows.GetConsoleMode(windows.Handle(windows.Stdin), &mode) == nil
+}

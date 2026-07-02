@@ -169,8 +169,27 @@ func cmdRun(args []string) error {
 		return runInTray(ctx, stop, eng, *paths, b)
 	}
 
-	fmt.Fprintf(os.Stderr, "seatguard running: %d identities, %d cred paths, poll %ds\n",
+	fmt.Fprintf(os.Stderr, "seatguard running: %d identities, %d cred paths, poll %ds — press Esc or Ctrl+C to stop\n",
 		len(b.Identities), len(b.CredPaths), b.PollSecs)
+
+	// Interactive foreground: watch the keyboard so Esc / q / Ctrl+C stop the
+	// daemon even when the console was left in raw mode by a caller (e.g. the
+	// setup wizard), where Ctrl+C is delivered as a byte instead of a signal.
+	// Skipped for piped/redirected/service stdin, which relies on signals.
+	if platform.StdinInteractive() {
+		kr := platform.NewKeyInput()
+		defer kr.Close()
+		go func() {
+			for {
+				k, r := kr.Read()
+				if k == platform.KeyEsc || (k == platform.KeyRune && (r == 'q' || r == 'Q')) {
+					fmt.Fprintln(os.Stderr, "\nstopping…")
+					stop()
+					return
+				}
+			}
+		}()
+	}
 	return eng.Run(ctx)
 }
 
