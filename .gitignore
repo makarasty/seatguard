@@ -1,0 +1,18 @@
+# Build output
+/dist/
+/bin/
+
+# Compiled binaries (built via `go build`; never checked in)
+/seatguard
+/seatguard.exe
+/harness
+/harness.exe
+/helper
+/helper.exe
+*.exe
+*.test
+*.out
+
+# Go workspace / editor cruft
+/vendor/
+.DS_Store
