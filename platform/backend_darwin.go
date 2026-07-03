@@ -98,14 +98,17 @@ func listPIDs() ([]int32, error) {
 
 func pidPath(pid int32) (string, error) {
 	buf := make([]byte, pidPathInfoMaxsize)
-	n, err := procInfo(callPIDInfo, pid, flavorPIDPathInfo, 0, unsafe.Pointer(&buf[0]), int32(len(buf)))
-	if err != nil {
+	// proc_pidpath's raw __proc_info return is NOT the path length (it is 0
+	// on success) — libproc reads the NUL-terminated buffer directly. So only
+	// a syscall error means failure; read the path out of the buffer.
+	if _, err := procInfo(callPIDInfo, pid, flavorPIDPathInfo, 0, unsafe.Pointer(&buf[0]), int32(len(buf))); err != nil {
 		return "", err
 	}
-	if n <= 0 {
+	path := string(buf[:clen(buf)])
+	if path == "" {
 		return "", fmt.Errorf("empty path for pid %d", pid)
 	}
-	return string(buf[:clen(buf[:n])]), nil
+	return path, nil
 }
 
 // pidStartTime returns start_time in microseconds since epoch — a stable
@@ -177,12 +180,10 @@ func fdVnodePath(pid, fd int32) (string, error) {
 	const pathOff = 160
 	const size = pathOff + 1024
 	buf := make([]byte, size)
-	n, err := procInfo(callPIDFDInfo, pid, flavorFDVnodePath, uint64(fd), unsafe.Pointer(&buf[0]), size)
-	if err != nil {
+	// err (not the raw return) signals failure, e.g. a non-vnode fd; the path
+	// is read straight out of the zero-initialized buffer at pathOff.
+	if _, err := procInfo(callPIDFDInfo, pid, flavorFDVnodePath, uint64(fd), unsafe.Pointer(&buf[0]), size); err != nil {
 		return "", err
-	}
-	if n < pathOff {
-		return "", fmt.Errorf("short vnode path info")
 	}
 	p := buf[pathOff:]
 	return string(p[:clen(p)]), nil
@@ -245,8 +246,9 @@ const (
 func fdRemote(pid, fd int32) (ip string, port uint16, ok bool) {
 	const bufSize = 2048 // sizeof(struct socket_fdinfo) is well under this
 	buf := make([]byte, bufSize)
-	n, err := procInfo(callPIDFDInfo, pid, flavorFDSocketInfo, uint64(fd), unsafe.Pointer(&buf[0]), bufSize)
-	if err != nil || int(n) < soiProtoOff+iniFaddrOff+16 {
+	// err (not the raw return) signals failure, e.g. a non-socket fd; parse
+	// the zero-initialized buffer at fixed offsets afterwards.
+	if _, err := procInfo(callPIDFDInfo, pid, flavorFDSocketInfo, uint64(fd), unsafe.Pointer(&buf[0]), bufSize); err != nil {
 		return "", 0, false
 	}
 	si := buf[sockFileInfo:] // socket_info
