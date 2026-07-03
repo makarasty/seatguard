@@ -17,10 +17,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    # The macOS backend (proc_info(2)) is Phase-1 beta until validated on
-    # Apple hardware, so its job is informational — it must not gate CI. The
-    # Windows and Linux backends are the deployable, gating targets.
-    continue-on-error: ${{ matrix.os == 'macos-latest' }}
+    # All three backends (Linux /proc, Windows syscalls, macOS proc_info(2)) are
+    # validated end-to-end by the harness below and gate CI equally. fail-fast
+    # is off so one target's failure still lets the others report.
     env:
       CGO_ENABLED: "0"
     steps:
@@ -37,12 +36,6 @@ jobs:
       - name: Add loopback alias (macOS)
         if: runner.os == 'macOS'
         run: sudo ifconfig lo0 alias 127.209.31.7 up
-      # Backend self-diagnostics — prints what each Backend method returns for
-      # the current process. Informational (never blocks); the main value is
-      # comparing macOS output against Linux/Windows to pinpoint darwin bugs.
-      - name: Backend diagnostics
-        continue-on-error: true
-        run: go run ./cmd/diag
       - name: Acceptance harness (§6)
         run: go run ./cmd/harness
 

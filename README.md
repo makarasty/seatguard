@@ -76,7 +76,7 @@ Common flags on all commands: `--db`, `--key`, `--journal`, `--state`
 - **`platform/`** — OS backends behind build tags, all pure-Go / CGO-free:
   - **Linux** — `/proc` scanning (fd links for file holders, `/proc/net/tcp{,6}` inode→PID for connections)
   - **Windows** — Restart Manager (file holders) + `GetExtendedTcpTable` (conn→PID) + PEB read (cmdline) + Authenticode signer capture + protected-DACL file hardening
-  - **macOS** — `proc_info(2)` syscall + `sysctl KERN_PROCARGS2` (file holders, connections, cmdline, RSS) + `codesign` signer capture *(code-complete; see Validation status)*
+  - **macOS** — `proc_info(2)` syscall + `sysctl KERN_PROCARGS2` (file holders, connections, cmdline, RSS) + `codesign` signer capture
 - **`cmd/seatguard`** — CLI; **`cmd/harness`** — automated acceptance harness (`go run ./cmd/harness`); **`cmd/helper`** — test helper simulating legit/rogue processes
 
 ### Project layout
@@ -128,8 +128,10 @@ seatguard/
 
 `.github/workflows/ci.yml` runs `go vet`, the unit tests, **and the full §6 acceptance harness on Linux, Windows and macOS** — so every backend is validated end-to-end at runtime on each push (not merely cross-compiled), then builds static binaries for all three targets.
 
-- **Windows / Linux** — validated end-to-end and **gate CI** (locally on Windows; via CI on Linux). These are the deployable targets.
-- **macOS** — the backend is code-complete and CGO-free; the macOS CI job runs the same harness but is **`continue-on-error` (informational, non-gating)** because its `proc_info(2)` accessors are not yet confirmed on Apple hardware. Treat macOS as **beta until that job is green**. Every darwin accessor is bounds-checked and fails safe (a layout mismatch causes a missed detection, never a false positive or crash).
+All three targets are validated end-to-end and **gate CI equally** — a red harness on any OS fails the build:
+
+- **Windows / Linux** — the harness runs on `windows-latest` / `ubuntu-latest` (9/9).
+- **macOS** — the harness runs on `macos-latest` (Apple Silicon, arm64), so the `proc_info(2)` accessors are confirmed on real Apple hardware (9/9). Every darwin accessor is additionally bounds-checked and fails safe: a struct-layout mismatch causes a missed detection, never a false positive or crash.
 
 ## Deployment notes
 
@@ -141,7 +143,6 @@ seatguard/
 
 - **Event-driven backends** (eBPF on Linux, ETW on Windows, EndpointSecurity on macOS) to replace polling and close the sub-interval gap.
 - **Usage correlation** — tie observed egress to token-usage spikes.
-- **macOS hardware validation** sign-off (the CI job is the gate).
 - **Signature enforcement** — optionally require a valid signature match, not just capture it as metadata.
 - **Privileged service install** — run as a system service under a dedicated account with the DB/key owned by that account (and enforce that ownership).
 - **Code-signing / notarization** in the release pipeline.
