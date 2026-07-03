@@ -133,6 +133,15 @@ All three targets are validated end-to-end and **gate CI equally** — a red har
 - **Windows / Linux** — the harness runs on `windows-latest` / `ubuntu-latest` (9/9).
 - **macOS** — the harness runs on `macos-latest` (Apple Silicon, arm64), so the `proc_info(2)` accessors are confirmed on real Apple hardware (9/9). Every darwin accessor is additionally bounds-checked and fails safe: a struct-layout mismatch causes a missed detection, never a false positive or crash.
 
+## Releases
+
+Releases are published automatically, gated on green tests — the `release` job runs only after the harness passes on all three OSes:
+
+- **Every push to `main`** refreshes a single rolling **`latest`** prerelease with fresh static binaries for `linux/amd64`, `darwin/arm64`, `windows/amd64`, plus a `SHA256SUMS` file.
+- **Pushing a `vX.Y.Z` tag** (`git tag v1.0.0 && git push origin v1.0.0`) cuts a permanent versioned release from that commit.
+
+Always verify a download against `SHA256SUMS` before running it. (The `GITHUB_TOKEN` needs write access: repo **Settings → Actions → General → Workflow permissions → Read and write**.)
+
 ## Deployment notes
 
 - Run **elevated** (Administrator / root) with the default paths so the DB/key/journal are owned by a privileged account; add `--require-privileged` to make that mandatory.

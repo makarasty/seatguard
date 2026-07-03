@@ -64,3 +64,51 @@ jobs:
         with:
           name: seatguard-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
+
+  # Publish binaries only after every test (all 3 OS) AND build target passed.
+  # Runs on pushes to main (rolling 'latest' prerelease) and on vX.Y.Z tag
+  # pushes (permanent versioned release). Never on PRs or forks.
+  release:
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    permissions:
+      contents: write # create releases/tags; scoped to this job only
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false # serialize so the rolling tag never races
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true # flatten all per-target artifacts into dist/
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum seatguard-* | tee SHA256SUMS
+      # Rolling prerelease: overwrite the single 'latest' release (and retarget
+      # its tag) with the freshest green main build. Delete-then-create avoids
+      # stale assets piling up. '|| true' covers the first run (nothing to delete).
+      - name: Publish rolling 'latest' (main)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          sha="${GITHUB_SHA::7}"
+          gh release delete latest --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          gh release create latest dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "latest ($sha)" \
+            --prerelease \
+            --notes "Rolling build from \`main\` @ \`$sha\`, auto-published after the §6 acceptance harness passed on Linux, Windows and macOS. For a pinned build, use a versioned \`vX.Y.Z\` release. Verify downloads against \`SHA256SUMS\`."
+      # Permanent release for an explicit semver tag, also gated on green tests.
+      - name: Publish versioned release (tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "seatguard $GITHUB_REF_NAME — static, CGO-free binaries for linux/amd64, darwin/arm64, windows/amd64. All §6 acceptance checks green on all three OSes. Verify downloads against \`SHA256SUMS\`."
