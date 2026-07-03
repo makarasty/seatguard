@@ -37,6 +37,12 @@ jobs:
       - name: Add loopback alias (macOS)
         if: runner.os == 'macOS'
         run: sudo ifconfig lo0 alias 127.209.31.7 up
+      # Backend self-diagnostics — prints what each Backend method returns for
+      # the current process. Informational (never blocks); the main value is
+      # comparing macOS output against Linux/Windows to pinpoint darwin bugs.
+      - name: Backend diagnostics
+        continue-on-error: true
+        run: go run ./cmd/diag
       - name: Acceptance harness (§6)
         run: go run ./cmd/harness
 
