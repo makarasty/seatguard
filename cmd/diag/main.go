@@ -28,6 +28,7 @@ func main() {
 	self, _ := os.Executable()
 	self = platform.CanonPath(self)
 	fmt.Printf("== backend diag: os=%s pid=%d ==\n", runtime.GOOS, pid)
+	fmt.Print(platform.SelfDiag())
 
 	// --- baseline: procInfo on self (RSS, cmdline, InstancesOf) ---
 	if rss, err := be.RSSBytes(pid); err != nil {
