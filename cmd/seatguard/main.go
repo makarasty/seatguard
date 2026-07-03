@@ -43,6 +43,8 @@ func main() {
 		err = cmdVerify(args)
 	case "log":
 		err = cmdLog(args)
+	case "autostart":
+		err = cmdAutostart(args)
 	case "help", "-h", "--help":
 		usage()
 	default:

@@ -141,9 +141,10 @@ type menuItem struct {
 	hot   byte // optional hotkey char (lowercase)
 }
 
-// runMenu shows an arrow-navigable menu. Returns the chosen index, or -1 if
-// the user quit (q/Esc). Enter or the item's hotkey selects immediately.
-func runMenu(kr *keyReader, title, subtitle string, items []menuItem) int {
+// runMenu shows an arrow-navigable menu, reading keys from next(). Returns
+// the chosen index, or -1 if the user backed out (q/Esc). Enter or the
+// item's hotkey selects immediately.
+func runMenu(next func() keyEvent, title, subtitle string, items []menuItem) int {
 	sel := 0
 	fmt.Print(curHide)
 	defer fmt.Print(curShow)
@@ -151,7 +152,7 @@ func runMenu(kr *keyReader, title, subtitle string, items []menuItem) int {
 		fmt.Print(scrHome, scrErase)
 		render := renderMenu(title, subtitle, items, sel)
 		fmt.Print(render)
-		ev := kr.next()
+		ev := next()
 		switch ev.k {
 		case keyUp:
 			sel = (sel - 1 + len(items)) % len(items)
@@ -209,17 +210,17 @@ type checkItem struct {
 	checked bool
 }
 
-// runChecklist shows an arrow-navigable checklist. Space toggles the
-// focused row, a/n select all/none, Enter confirms, q/Esc cancels.
-// Returns the final checked mask and true, or (nil,false) on cancel.
-func runChecklist(kr *keyReader, title, subtitle string, items []checkItem) ([]bool, bool) {
+// runChecklist shows an arrow-navigable checklist, reading keys from next().
+// Space toggles the focused row, a/n select all/none, Enter confirms, q/Esc
+// cancels. Returns the final checked mask and true, or (nil,false) on cancel.
+func runChecklist(next func() keyEvent, title, subtitle string, items []checkItem) ([]bool, bool) {
 	sel := 0
 	fmt.Print(curHide)
 	defer fmt.Print(curShow)
 	for {
 		fmt.Print(scrHome, scrErase)
 		fmt.Print(renderChecklist(title, subtitle, items, sel))
-		ev := kr.next()
+		ev := next()
 		switch ev.k {
 		case keyUp:
 			sel = (sel - 1 + len(items)) % len(items)

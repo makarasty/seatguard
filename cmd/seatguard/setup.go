@@ -30,41 +30,57 @@ func cmdSetup(args []string) error {
 	fmt.Print(scrClear)
 	fmt.Print(banner())
 
-	// If a valid baseline already exists, don't re-ask everything: offer to
-	// start straight away, and only re-scan/edit on request.
-	if existing := loadExisting(*paths); existing != nil && len(existing.Identities) > 0 && !*reconfigure {
-		b, action := configuredMenu(kr, *paths, existing)
+	// Navigation loop: each step can return "back" (Esc) to re-show the
+	// previous one instead of exiting. Once a baseline exists (fresh enroll or
+	// pre-existing), the entry point is the "already configured" menu.
+	for {
+		b, back, done, err := selectStep(kr, *paths, *poll, *reconfigure)
+		*reconfigure = false // only forces the FIRST pass
+		if err != nil || done {
+			return err
+		}
+		if back || b == nil {
+			// Nothing selected (cancelled on a fresh machine) → exit.
+			if loadExisting(*paths) == nil {
+				fmt.Print(scrClear)
+				fmt.Println("  aborted; nothing was written")
+				return nil
+			}
+			continue // re-show the configured menu
+		}
+		err, back = startProtection(kr, *paths, b)
+		if back {
+			continue // Esc in the start menu → back to the configured/select step
+		}
+		return err
+	}
+}
+
+// selectStep runs one iteration of the "what to enroll" step and returns the
+// resulting baseline. done=true means the user already made a terminal choice
+// (e.g. Quit) and the wizard should exit.
+func selectStep(kr *keyReader, paths core.Paths, poll int, reconfigure bool) (b *core.Baseline, back, done bool, err error) {
+	existing := loadExisting(paths)
+	if existing != nil && len(existing.Identities) > 0 && !reconfigure {
+		eb, action := configuredMenu(kr, paths, existing)
 		switch action {
 		case actStart:
-			return startProtection(kr, *paths, b)
+			return eb, false, false, nil
 		case actQuit:
 			fmt.Print(scrClear)
 			fmt.Println("  no changes. seatguard is still configured.")
-			return nil
-		case actEdit, actRescan:
-			// fall through to selection (edit) or auto re-enroll (rescan)
+			return nil, false, true, nil
+		case actRescan:
+			nb, e := reenrollAll(paths, poll)
+			return nb, false, false, e
+		default: // actEdit — checklist pre-checked from the current baseline
+			nb, e := selectAndEnroll(kr.next, paths, poll, enrolledSet(existing))
+			return nb, nb == nil && e == nil, false, e // nb==nil (Esc) → back
 		}
-		if action == actRescan {
-			nb, err := reenrollAll(*paths, *poll)
-			if err != nil {
-				return err
-			}
-			return startProtection(kr, *paths, nb)
-		}
-		// actEdit: run the checklist pre-checked from the current baseline.
-		nb, err := selectAndEnroll(kr, *paths, *poll, enrolledSet(existing))
-		if err != nil || nb == nil {
-			return err
-		}
-		return startProtection(kr, *paths, nb)
 	}
-
 	// Fresh setup: full checklist, everything pre-selected.
-	b, err := selectAndEnroll(kr, *paths, *poll, nil)
-	if err != nil || b == nil {
-		return err
-	}
-	return startProtection(kr, *paths, b)
+	nb, e := selectAndEnroll(kr.next, paths, poll, nil)
+	return nb, nb == nil && e == nil, false, e
 }
 
 // setup action from the "already configured" menu.
@@ -109,7 +125,7 @@ func configuredMenu(kr *keyReader, paths core.Paths, b *core.Baseline) (*core.Ba
 		{label: "Edit selection", desc: "choose which binaries are enrolled", hot: 'e'},
 		{label: "Quit", desc: "leave configuration unchanged", hot: 'q'},
 	}
-	switch runMenu(kr, "seatguard is already configured", sub, menu) {
+	switch runMenu(kr.next, "seatguard is already configured", sub, menu) {
 	case 0:
 		return b, actStart
 	case 1:
@@ -124,7 +140,7 @@ func configuredMenu(kr *keyReader, paths core.Paths, b *core.Baseline) (*core.Ba
 // selectAndEnroll runs the discovery checklist and enrolls the chosen
 // binaries. preChecked (nil = all) decides which rows start ticked. Returns
 // (nil, nil) if the user cancelled.
-func selectAndEnroll(kr *keyReader, paths core.Paths, poll int, preChecked map[string]bool) (*core.Baseline, error) {
+func selectAndEnroll(next func() keyEvent, paths core.Paths, poll int, preChecked map[string]bool) (*core.Baseline, error) {
 	fmt.Print(scrClear, banner())
 	fmt.Printf("\n  %s◇%s scanning for Claude installations…\n", cCyan, cReset)
 	found := core.DiscoverInstalls()
@@ -145,7 +161,7 @@ func selectAndEnroll(kr *keyReader, paths core.Paths, poll int, preChecked map[s
 		items[i] = checkItem{label: shortPath(f.Path), sub: sub, checked: checked}
 	}
 	sub := fmt.Sprintf("%d found · pick which binaries are your legitimate Claude", len(found))
-	mask, ok := runChecklist(kr, "Select Claude installations", sub, items)
+	mask, ok := runChecklist(next, "Select Claude installations", sub, items)
 	if !ok {
 		fmt.Print(scrClear)
 		fmt.Println("  aborted; nothing was written")
@@ -166,7 +182,7 @@ func selectAndEnroll(kr *keyReader, paths core.Paths, poll int, preChecked map[s
 		fmt.Print(scrClear)
 		return nil, fmt.Errorf("no binaries selected; nothing to enroll")
 	}
-	return enrollAndReport(kr, paths, opts)
+	return enrollAndReport(next, paths, opts)
 }
 
 // reenrollAll re-enrolls every discovered install without prompting (the
@@ -182,7 +198,7 @@ func reenrollAll(paths core.Paths, poll int) (*core.Baseline, error) {
 	return b, nil
 }
 
-func enrollAndReport(kr *keyReader, paths core.Paths, opts core.EnrollOptions) (*core.Baseline, error) {
+func enrollAndReport(next func() keyEvent, paths core.Paths, opts core.EnrollOptions) (*core.Baseline, error) {
 	fmt.Print(scrClear)
 	fmt.Printf("\n  %s◇%s enrolling %d binaries…\n", cCyan, cReset, len(opts.ExtraBinaries))
 	b, err := core.Enroll(paths, platform.New(), opts)
@@ -195,12 +211,14 @@ func enrollAndReport(kr *keyReader, paths core.Paths, opts core.EnrollOptions) (
 	}
 	fmt.Printf("  %swatching:%s %s\n", cMuted, cReset, strings.Join(shortPaths(b.CredPaths), ", "))
 	fmt.Printf("\n  %spress any key to continue…%s", cMuted, cReset)
-	kr.next()
+	next()
 	return b, nil
 }
 
 // startProtection shows the "how to run" menu and launches the chosen mode.
-func startProtection(kr *keyReader, paths core.Paths, b *core.Baseline) error {
+// Returns back=true when the user pressed Esc to return to the previous step
+// (so the wizard can re-show it) rather than choosing a run mode.
+func startProtection(kr *keyReader, paths core.Paths, b *core.Baseline) (err error, back bool) {
 	commonFlags := paths.Args()
 	trayDesc := "run hidden with a status icon"
 	if runtime.GOOS != "windows" {
@@ -210,10 +228,13 @@ func startProtection(kr *keyReader, paths core.Paths, b *core.Baseline) error {
 		{label: "Live dashboard", desc: "start protection + open the live view", hot: 'd'},
 		{label: "System tray", desc: trayDesc, hot: 't'},
 		{label: "Foreground", desc: "run here, stream alerts", hot: 'r'},
-		{label: "Autostart at logon", desc: "install a startup task", hot: 'i'},
+		{label: "Autostart at logon", desc: "run in the tray at every logon", hot: 'i'},
 		{label: "Exit", desc: "enrolled; start later", hot: 'x'},
 	}
-	choice := runMenu(kr, "Start protection", fmt.Sprintf("%d identities enrolled — choose how to run it", len(b.Identities)), menu)
+	choice := runMenu(kr.next, "Start protection", fmt.Sprintf("%d identities enrolled — Esc to go back", len(b.Identities)), menu)
+	if choice == -1 {
+		return nil, true // Esc → back to the previous step
+	}
 	fmt.Print(scrClear, curShow)
 	// Restore the console (line mode, echo, Ctrl+C-as-signal) BEFORE handing
 	// off: the next command opens its own key source, and a foreground `run`
@@ -221,24 +242,24 @@ func startProtection(kr *keyReader, paths core.Paths, b *core.Baseline) error {
 	kr.close()
 	switch choice {
 	case 0: // dashboard
-		if err := startBackgroundDaemon(commonFlags); err != nil {
-			fmt.Printf("%scould not start background daemon: %v%s\n", cYell, err, cReset)
+		if e := startBackgroundDaemon(commonFlags); e != nil {
+			fmt.Printf("%scould not start background daemon: %v%s\n", cYell, e, cReset)
 			fmt.Println("Falling back to foreground run (Esc or Ctrl+C to stop).")
-			return cmdRun(commonFlags)
+			return cmdRun(commonFlags), false
 		}
-		return cmdDashboard(commonFlags)
+		return cmdDashboard(commonFlags), false
 	case 1: // tray
-		return cmdRun(append(commonFlags, "--tray"))
+		return cmdRun(append(commonFlags, "--tray")), false
 	case 2: // foreground
 		fmt.Printf("\n%sRunning. Alerts appear below. Esc or Ctrl+C to stop.%s\n", cBold, cReset)
-		return cmdRun(commonFlags)
+		return cmdRun(commonFlags), false
 	case 3: // autostart
-		return installAutostart(paths)
-	default: // exit or cancel
+		return installAutostart(paths), false
+	default: // Exit
 		fmt.Println("\n  Setup complete. Start any time with:")
 		fmt.Printf("    %sseatguard dashboard%s   live view\n", cCyan, cReset)
 		fmt.Printf("    %sseatguard run --tray%s  background (Windows)\n", cCyan, cReset)
-		return nil
+		return nil, false
 	}
 }
 
@@ -300,21 +321,49 @@ func installAutostart(paths core.Paths) error {
 		return nil
 	}
 
-	tr := fmt.Sprintf(`"%s" run --db "%s" --key "%s" --journal "%s" --state "%s"`,
+	// Register a per-user logon entry (HKCU\...\Run) — writable without
+	// elevation, unlike a Task Scheduler /RL HIGHEST task. Runs in the tray
+	// so there's a visible status icon at logon.
+	cmdline := fmt.Sprintf(`"%s" run --tray --db "%s" --key "%s" --journal "%s" --state "%s"`,
 		self, paths.DB, paths.Key, paths.Journal, paths.State)
-	cmd := exec.Command("schtasks", "/Create", "/TN", "seatguard", "/TR", tr, "/SC", "ONLOGON", "/RL", "HIGHEST", "/F")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		fmt.Printf("%sschtasks failed:%s %s\n", cRed, cReset, strings.TrimSpace(string(out)))
-		fmt.Println("Hint: /RL HIGHEST needs an elevated (Administrator) console.")
-		fmt.Println("Either rerun setup elevated, or register without elevation:")
-		fmt.Printf(`  schtasks /Create /TN seatguard /TR '%s' /SC ONLOGON /F`+"\n", tr)
+	if err := platform.SetAutostart("seatguard", cmdline); err != nil {
+		fmt.Printf("%sautostart install failed:%s %v\n", cRed, cReset, err)
 		return err
 	}
-	fmt.Printf("%sAutostart installed:%s task \"seatguard\" runs at logon.\n", cGreen, cReset)
-	fmt.Println("Start it now with:  schtasks /Run /TN seatguard")
-	fmt.Println("Remove with:        schtasks /Delete /TN seatguard /F")
+	fmt.Printf("%s✓ autostart installed%s — runs in the tray at every logon.\n", cGreen, cReset)
+
+	// Start it now (detached) so the tray icon appears immediately.
+	commonFlags := append(paths.Args(), "--tray")
+	if err := startBackgroundDaemon(commonFlags); err != nil {
+		fmt.Printf("  %sit will start at next logon (couldn't launch now: %v)%s\n", cYell, err, cReset)
+	} else {
+		fmt.Println("  started now — look for the tray icon near the clock.")
+	}
+	fmt.Println("  remove any time with:  seatguard autostart remove")
 	return nil
+}
+
+// cmdAutostart installs or removes the logon autostart entry.
+//
+//	seatguard autostart [install|remove] [--db … --key … …]
+func cmdAutostart(args []string) error {
+	sub, rest := "install", args
+	if len(args) > 0 && (args[0] == "install" || args[0] == "remove" || args[0] == "off" || args[0] == "on") {
+		sub, rest = args[0], args[1:]
+	}
+	fs := flag.NewFlagSet("autostart", flag.ExitOnError)
+	paths := pathFlags(fs)
+	fs.Parse(rest)
+	initColors()
+
+	if sub == "remove" || sub == "off" {
+		if err := platform.RemoveAutostart("seatguard"); err != nil {
+			return fmt.Errorf("remove autostart: %w", err)
+		}
+		fmt.Println("autostart removed.")
+		return nil
+	}
+	return installAutostart(*paths)
 }
 
 // banner renders the wizard splash header.

@@ -41,7 +41,9 @@ CGO_ENABLED=0 go build -o seatguard ./cmd/seatguard
 
 The wizard is fully keyboard-driven (no typing paths, no Enter-per-line): an arrow-key **checklist** to pick which discovered Claude binaries are legitimate (`↑↓` move, `space` toggle, `a`/`n` all/none, `Enter` confirm), then an arrow-key **menu** to choose how to start — live dashboard, hidden in the **system tray** (Windows), foreground, or autostart. `Esc` or `q` exits any menu.
 
-**It remembers.** If a valid baseline already exists, the wizard doesn't re-ask everything — it shows a short menu (Start / Re-scan & update / Edit selection / Quit) and flags any drift (new Claude installs on disk, or enrolled binaries whose hash changed after an update). Pass `--reconfigure` to force the full selection.
+**It remembers.** If a valid baseline already exists, the wizard doesn't re-ask everything — it shows a short menu (Start / Re-scan & update / Edit selection / Quit) and flags any drift (new Claude installs on disk, or enrolled binaries whose hash changed after an update). Pass `--reconfigure` to force the full selection. `Esc` goes **back** a step in any menu (not straight out).
+
+**Change settings without restarting.** In the live dashboard press `Esc` (or `s`) to open a settings menu — update/reconfigure the baseline, verify, view the log — then `Esc`/Back to return to the live view. `seatguard autostart` installs a per-user logon entry (runs in the tray; no admin needed); `seatguard autostart remove` uninstalls it.
 
 This is the recommended path; the individual commands below exist for scripting.
 
@@ -60,7 +62,8 @@ This is the recommended path; the individual commands below exist for scripting.
 | `seatguard setup` | Interactive wizard: discover all Claude installs, enroll, start (also runs with no arguments) | `--poll`, plus common flags |
 | `seatguard enroll` | Create the protected baseline non-interactively (discovers claude/node) | `--claude-path`, `--claude-dir`, `--cred`, `--api-host`, `--api-ip`, `--poll`, `--no-discover` |
 | `seatguard run` | Foreground polling daemon; verifies DB integrity + its own binary hash at startup and refuses to run on mismatch (fail-safe); single-instance per baseline | `--tray` (Windows: hide in system tray), `--require-privileged` |
-| `seatguard dashboard` | Live auto-refreshing security dashboard (TUI) | `--refresh` |
+| `seatguard dashboard` | Live auto-refreshing security dashboard (TUI); `Esc`/`s` opens in-app settings | `--refresh` |
+| `seatguard autostart` | `install` (default) / `remove` a per-user logon entry that runs in the tray (Windows; no admin) | common flags |
 | `seatguard status` | One-shot security posture + score | — |
 | `seatguard verify` | Check baseline HMAC, journal hash chain, daemon self-hash; nonzero exit on violation | — |
 | `seatguard log` | Print event journal (verifies chain) | `--json` for machine-readable output |

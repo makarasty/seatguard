@@ -116,9 +116,9 @@ func renderPosture(p *core.Posture, tick int) string {
 		b.WriteString(fmt.Sprintf("    %spid%s %d %s(start %d)%s   %starget%s %s\n", cMuted, cReset, a.PID, cDim, a.StartTime, cReset, cMuted, cReset, a.Target))
 	}
 
-	b.WriteString(fmt.Sprintf("\n  %supdated %s%s   %s[q]%s quit  %s[v]%s verify  %s[u]%s update  %s[l]%s log\n",
+	b.WriteString(fmt.Sprintf("\n  %supdated %s%s   %s[s]%s or %sEsc%s settings   %s[v]%s verify  %s[u]%s update  %s[l]%s log  %s[q]%s quit\n",
 		cMuted, p.GeneratedAt.Format("15:04:05"), cReset,
-		cCyan, cReset, cCyan, cReset, cCyan, cReset, cCyan, cReset))
+		cCyan, cReset, cCyan, cReset, cCyan, cReset, cCyan, cReset, cCyan, cReset, cCyan, cReset))
 	return b.String()
 }
 
@@ -162,13 +162,16 @@ func cmdDashboard(args []string) error {
 	}
 	draw()
 
-	// hotkey extracts a lowercase command letter from a key event.
+	nextKey := func() keyEvent { return <-keys }
+
+	// hotkey extracts a command letter from a key event. Esc opens the
+	// settings menu (a place to go "back" to) rather than quitting outright.
 	hotkey := func(ev keyEvent) byte {
 		if ev.k == keyChar {
 			return lower(ev.r)
 		}
 		if ev.k == keyEsc {
-			return 'q'
+			return 's'
 		}
 		return 0
 	}
@@ -181,6 +184,12 @@ func cmdDashboard(args []string) error {
 			switch hotkey(ev) {
 			case 'q':
 				return nil
+			case 's':
+				if dashboardSettings(nextKey, *paths) {
+					return nil // chose Quit
+				}
+				fmt.Print(scrClear)
+				draw()
 			case 'v':
 				fmt.Print(scrClear)
 				fmt.Printf("%sRe-verifying integrity...%s\n\n", cBold, cReset)
@@ -206,6 +215,56 @@ func cmdDashboard(args []string) error {
 				fmt.Print(curHide, scrClear)
 				draw()
 			}
+		}
+	}
+}
+
+// dashboardSettings is the in-app settings menu (opened with Esc or 's'), so
+// configuration is reachable without restarting. Returns true if the user
+// chose to quit the dashboard. Esc / "Back" returns to the live view.
+func dashboardSettings(next func() keyEvent, paths core.Paths) (quit bool) {
+	pause := func() {
+		fmt.Printf("\n%spress any key to go back%s", cDim, cReset)
+		next()
+	}
+	menu := []menuItem{
+		{label: "Update baseline", desc: "re-scan installs, refresh hashes after a Claude update", hot: 'u'},
+		{label: "Reconfigure", desc: "choose which Claude installs are enrolled", hot: 'r'},
+		{label: "Verify integrity", desc: "re-check DB / journal / self-hash", hot: 'v'},
+		{label: "View log", desc: "recent journal entries", hot: 'l'},
+		{label: "Back to dashboard", desc: "(or Esc)", hot: 'b'},
+		{label: "Quit dashboard", desc: "the background daemon keeps running", hot: 'x'},
+	}
+	for {
+		switch runMenu(next, "Settings", "change configuration without restarting · Esc = back", menu) {
+		case 0: // update baseline
+			fmt.Print(scrClear)
+			if err := updateBaseline(paths); err != nil {
+				fmt.Printf("%supdate failed: %v%s\n", cRed, err, cReset)
+			}
+			pause()
+		case 1: // reconfigure
+			fmt.Print(scrClear)
+			if _, err := selectAndEnroll(next, paths, 4, nil); err != nil {
+				fmt.Printf("%s%v%s\n", cYell, err, cReset)
+			} else {
+				fmt.Printf("\n%s✓ reconfigured.%s %srestart protection to load the new baseline into the running daemon.%s\n", cGreen, cReset, cMuted, cReset)
+			}
+			pause()
+		case 2: // verify
+			fmt.Print(scrClear)
+			fmt.Printf("%sRe-verifying integrity…%s\n\n", cBold, cReset)
+			core.VerifyAll(paths, os.Stdout)
+			pause()
+		case 3: // log
+			fmt.Print(scrClear, curShow)
+			printRecentLog(paths, 20)
+			pause()
+			fmt.Print(curHide)
+		case 5: // quit
+			return true
+		default: // 4 "Back", or Esc (-1)
+			return false
 		}
 	}
 }
