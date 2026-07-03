@@ -158,7 +158,11 @@ func hexToIP(h string, v6 bool) (net.IP, error) {
 		if len(raw) != 4 {
 			return nil, fmt.Errorf("bad v4 addr")
 		}
-		v := binary.LittleEndian.Uint32(raw)
+		// /proc prints the __be32 as %08X, i.e. big-endian text of a
+		// little-endian machine's view — so the IP bytes are the LE bytes of
+		// the value the hex string denotes. Read big-endian, emit LE order.
+		// (127.209.31.7 is stored "071FD17F"; 127.0.0.1 is "0100007F".)
+		v := binary.BigEndian.Uint32(raw)
 		return net.IPv4(byte(v), byte(v>>8), byte(v>>16), byte(v>>24)).To4(), nil
 	}
 	if len(raw) != 16 {
