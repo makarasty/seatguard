@@ -136,39 +136,71 @@ var (
 // ---- single-select menu ----
 
 type menuItem struct {
-	label string
-	desc  string
-	hot   byte // optional hotkey char (lowercase)
+	label    string
+	desc     string
+	hot      byte   // optional hotkey char (lowercase)
+	value    string // optional right-aligned status text (e.g. "On")
+	section  bool   // a non-selectable section header row
+	danger   bool   // tint the label red (destructive action)
+	disabled bool   // shown dimmed, not selectable
 }
 
-// runMenu shows an arrow-navigable menu, reading keys from next(). Returns
-// the chosen index, or -1 if the user backed out (q/Esc). Enter or the
-// item's hotkey selects immediately.
-func runMenu(next func() keyEvent, title, subtitle string, items []menuItem) int {
-	sel := 0
+// selectable reports whether the row can receive focus / be chosen.
+func (m menuItem) selectable() bool { return !m.section && !m.disabled }
+
+// firstSelectable / nextSelectable / prevSelectable let arrow navigation skip
+// over section headers and disabled rows so focus only ever lands on a real
+// action.
+func firstSelectable(items []menuItem) int {
+	for i := range items {
+		if items[i].selectable() {
+			return i
+		}
+	}
+	return -1
+}
+
+func stepSelectable(items []menuItem, from, dir int) int {
+	if from < 0 {
+		return firstSelectable(items)
+	}
+	n := len(items)
+	for i := 1; i <= n; i++ {
+		j := ((from+dir*i)%n + n) % n
+		if items[j].selectable() {
+			return j
+		}
+	}
+	return from
+}
+
+// runMenu shows an arrow-navigable menu, reading keys from next(). header is an
+// optional pre-rendered block (e.g. a status card) shown above the items.
+// Returns the chosen index, or -1 if the user backed out (Esc). Enter or an
+// item's hotkey selects immediately; section/disabled rows are skipped.
+func runMenu(next func() keyEvent, title, subtitle, header string, items []menuItem) int {
+	sel := firstSelectable(items)
 	fmt.Print(curHide)
 	defer fmt.Print(curShow)
 	for {
 		fmt.Print(scrHome, scrErase)
-		render := renderMenu(title, subtitle, items, sel)
-		fmt.Print(render)
+		fmt.Print(renderMenu(title, subtitle, header, items, sel))
 		ev := next()
 		switch ev.k {
-		case keyUp:
-			sel = (sel - 1 + len(items)) % len(items)
-		case keyDown:
-			sel = (sel + 1) % len(items)
-		case keyEnter:
-			return sel
+		case keyUp, keyLeft:
+			sel = stepSelectable(items, sel, -1)
+		case keyDown, keyRight:
+			sel = stepSelectable(items, sel, +1)
+		case keyEnter, keySpace:
+			if sel >= 0 && items[sel].selectable() {
+				return sel
+			}
 		case keyEsc:
 			return -1
 		case keyChar:
 			c := lower(ev.r)
-			if c == 'q' {
-				return -1
-			}
 			for i, it := range items {
-				if it.hot != 0 && it.hot == c {
+				if it.selectable() && it.hot != 0 && it.hot == c {
 					return i
 				}
 			}
@@ -176,30 +208,130 @@ func runMenu(next func() keyEvent, title, subtitle string, items []menuItem) int
 	}
 }
 
-func renderMenu(title, subtitle string, items []menuItem, sel int) string {
+// menuLabelCol is the column the right-aligned value text starts at.
+const menuLabelCol = 34
+
+func renderMenu(title, subtitle, header string, items []menuItem, sel int) string {
 	var b strings.Builder
 	b.WriteString("\n  " + cBold + cCyan + "◆ " + title + cReset + "\n")
 	if subtitle != "" {
 		b.WriteString("  " + cMuted + subtitle + cReset + "\n")
 	}
+	if header != "" {
+		b.WriteString(header)
+	}
 	b.WriteString("\n")
 	for i, it := range items {
-		if i == sel {
-			b.WriteString("  " + cAccent + "▐ " + cReset + cBold + it.label + cReset)
-			if it.desc != "" {
-				b.WriteString("  " + cMuted + it.desc + cReset)
+		switch {
+		case it.section:
+			// Muted uppercase section header with a trailing rule.
+			label := strings.ToUpper(it.label)
+			rule := ""
+			if pad := 58 - len(label); pad > 0 {
+				rule = " " + cDim + strings.Repeat("─", pad-1) + cReset
 			}
+			b.WriteString("\n  " + cMuted + label + cReset + rule + "\n")
+			continue
+		case it.disabled:
+			b.WriteString("    " + cDim + it.label + cReset)
+			b.WriteString(valueTail(it, cDim))
 			b.WriteString("\n")
+			continue
+		}
+		focused := i == sel
+		labelCol := cReset
+		if it.danger {
+			labelCol = cRed
+		}
+		if focused {
+			b.WriteString("  " + cAccent + "▐ " + cReset + cBold + labelCol + it.label + cReset)
 		} else {
-			b.WriteString("  " + cDim + "  " + it.label + cReset)
-			if it.desc != "" {
-				b.WriteString("  " + cDim + it.desc + cReset)
+			b.WriteString("    " + labelCol + it.label + cReset)
+		}
+		b.WriteString(valueTail(it, cMuted))
+		if it.desc != "" {
+			descCol := cMuted
+			if !focused {
+				descCol = cDim
 			}
-			b.WriteString("\n")
+			b.WriteString("  " + descCol + it.desc + cReset)
+		}
+		b.WriteString("\n")
+	}
+	// No hard-coded bottom hint: the caller's subtitle carries the navigation
+	// help (and the correct Esc action for this screen), so a fixed "Esc back"
+	// here would contradict a top-level menu where Esc quits.
+	return b.String()
+}
+
+// valueTail renders an item's right-aligned value, padded so values line up.
+func valueTail(it menuItem, col string) string {
+	if it.value == "" {
+		return ""
+	}
+	pad := menuLabelCol - len(it.label)
+	if pad < 2 {
+		pad = 2
+	}
+	return strings.Repeat(" ", pad) + col + it.value + cReset
+}
+
+// ---- yes/no confirmation ----
+
+// runConfirm shows a modal yes/no prompt. It defaults to "No" (safe) and
+// returns true only if the user explicitly confirms. Esc / n / q = No.
+// danger tints the confirm button red for destructive actions.
+func runConfirm(next func() keyEvent, title string, body []string, confirmLabel string, danger bool) bool {
+	yes := false // start on "No"
+	fmt.Print(curHide)
+	defer fmt.Print(curShow)
+	for {
+		fmt.Print(scrHome, scrErase)
+		var b strings.Builder
+		warn := cYell
+		if danger {
+			warn = cRed
+		}
+		b.WriteString("\n  " + cBold + warn + "▲ " + title + cReset + "\n\n")
+		for _, line := range body {
+			b.WriteString("  " + cMuted + line + cReset + "\n")
+		}
+		b.WriteString("\n  ")
+		noBtn, yesBtn := "  No  ", "  "+confirmLabel+"  "
+		yesCol := cInvGreen
+		if danger {
+			yesCol = cInvRed
+		}
+		if yes {
+			b.WriteString(cDim + " " + noBtn + " " + cReset + "   " + yesCol + yesBtn + cReset)
+		} else {
+			b.WriteString(cInvGrey + " " + noBtn + " " + cReset + "   " + cDim + yesBtn + cReset)
+		}
+		b.WriteString("\n\n  " + cMuted + "←→ choose · ⏎ confirm · Esc cancel" + cReset + "\n")
+		fmt.Print(b.String())
+		ev := next()
+		switch ev.k {
+		case keyLeft, keyRight, keyUp, keyDown:
+			yes = !yes
+		case keyEnter, keySpace:
+			return yes
+		case keyEsc:
+			return false
+		case keyChar:
+			switch lower(ev.r) {
+			case 'y':
+				return true
+			case 'n', 'q':
+				return false
+			}
 		}
 	}
-	b.WriteString("\n  " + cMuted + "↑↓ move · ⏎ select · q quit" + cReset + "\n")
-	return b.String()
+}
+
+// pressAnyKey shows a hint and waits for one key — the return-from-result idiom.
+func pressAnyKey(next func() keyEvent) {
+	fmt.Printf("\n  %spress any key to go back%s", cDim, cReset)
+	next()
 }
 
 // ---- multi-select checklist ----

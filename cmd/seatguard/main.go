@@ -45,6 +45,10 @@ func main() {
 		err = cmdLog(args)
 	case "autostart":
 		err = cmdAutostart(args)
+	case "clear-log":
+		err = cmdClearLog(args)
+	case "uninstall":
+		err = cmdUninstall(args)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -61,15 +65,20 @@ func main() {
 func usage() {
 	fmt.Fprint(os.Stderr, `usage: seatguard <command> [flags]
 
+Launched with no arguments, seatguard opens the interactive control center
+(first run: a setup wizard that finds your Claude installs and enrolls them).
+
 commands:
-  setup    interactive wizard: find all Claude installs, enroll, start
-           (also runs when seatguard is launched with no arguments)
-  enroll   create the protected baseline of legitimate Claude binaries
-  run      start the polling detection daemon (foreground; --tray to hide in tray)
-  dashboard  live security dashboard (auto-refreshing TUI)
-  status   one-shot security posture and score
-  verify   check baseline HMAC, journal hash chain and daemon self-hash
-  log      print the event journal
+  setup      first-run wizard, then the control center (default with no args)
+  dashboard  open the control center on the live security monitor
+  enroll     create the protected baseline of legitimate Claude binaries
+  run        start the polling detection daemon (foreground; --tray for tray)
+  status     one-shot security posture and score
+  verify     check baseline HMAC, journal hash chain and daemon self-hash
+  log        print the event journal
+  clear-log  erase the activity log (needs --yes)
+  autostart  install|remove the logon autostart entry
+  uninstall  stop protection and remove all data + autostart (needs --yes)
 
 common flags: --db --key --journal --state (see 'seatguard <cmd> -h')
 `)
@@ -320,5 +329,66 @@ func cmdLog(args []string) error {
 		fmt.Fprintf(os.Stderr, "journal verification FAILED: %v\n", verr)
 		os.Exit(3)
 	}
+	return nil
+}
+
+// cmdClearLog erases the activity log from the CLI. Requires --yes so it can't
+// wipe history by accident, and stops a running daemon first (a stale in-memory
+// chain would otherwise open a sequence gap on its next append).
+func cmdClearLog(args []string) error {
+	fs := flag.NewFlagSet("clear-log", flag.ExitOnError)
+	paths := pathFlags(fs)
+	yes := fs.Bool("yes", false, "confirm erasing the activity log")
+	fs.Parse(args)
+
+	if !*yes {
+		fmt.Println("This erases the activity log (a fresh tamper-evident chain is started).")
+		fmt.Println("Re-run to confirm:  seatguard clear-log --yes")
+		return nil
+	}
+	if daemonRunning(*paths) {
+		if _, err := stopDaemon(*paths); err != nil {
+			return fmt.Errorf("stop the running daemon first: %w", err)
+		}
+		fmt.Println("stopped the running monitor; restart it after clearing.")
+	}
+	key, err := core.LoadKey(paths.Key)
+	if err != nil {
+		return err
+	}
+	if err := core.ClearJournal(*paths, key); err != nil {
+		return err
+	}
+	fmt.Println("activity log cleared.")
+	return nil
+}
+
+// cmdUninstall stops protection and removes seatguard's data + autostart from
+// the CLI. Requires --yes. The program binary itself is left in place.
+func cmdUninstall(args []string) error {
+	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
+	paths := pathFlags(fs)
+	yes := fs.Bool("yes", false, "confirm removal of all data and autostart")
+	fs.Parse(args)
+
+	if !*yes {
+		fmt.Println("This stops protection and deletes the baseline, key, journal, state and")
+		fmt.Println("autostart entry. Re-run to confirm:  seatguard uninstall --yes")
+		return nil
+	}
+	if daemonRunning(*paths) {
+		if _, err := stopDaemon(*paths); err != nil {
+			// Do NOT delete data out from under a live daemon — it would just
+			// recreate orphaned, unverifiable files. Abort and let the user stop
+			// it (e.g. from the tray) first.
+			return fmt.Errorf("could not stop the running monitor (%w); stop it, then re-run uninstall", err)
+		}
+	}
+	res := core.Uninstall(*paths)
+	fmt.Printf("removed %d data file(s); autostart removed: %v\n", len(res.Removed), res.AutostartRemoved)
+	for p, e := range res.Failed {
+		fmt.Fprintf(os.Stderr, "  could not delete %s: %s\n", p, e)
+	}
+	fmt.Println("done. You can now delete the seatguard program file.")
 	return nil
 }

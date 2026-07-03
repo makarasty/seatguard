@@ -39,17 +39,15 @@ CGO_ENABLED=0 go build -o seatguard ./cmd/seatguard
 ./seatguard            # or: ./seatguard setup
 ```
 
-The wizard is fully keyboard-driven (no typing paths, no Enter-per-line): an arrow-key **checklist** to pick which discovered Claude binaries are legitimate (`↑↓` move, `space` toggle, `a`/`n` all/none, `Enter` confirm), then an arrow-key **menu** to choose how to start — live dashboard, hidden in the **system tray** (Windows), foreground, or autostart. `Esc` or `q` exits any menu.
+The first run is a keyboard-driven **checklist** (no typing paths, no Enter-per-line) that picks which discovered Claude binaries are legitimate (`↑↓` move, `space` toggle, `a`/`n` all/none, `Enter` confirm). After enrolling it opens the **control center** — the single home screen for everything. On later runs, if a valid baseline already exists, it opens the control center straight away (pass `--reconfigure` to redo the selection).
 
-**It remembers.** If a valid baseline already exists, the wizard doesn't re-ask everything — it shows a short menu (Start / Re-scan & update / Edit selection / Quit) and flags any drift (new Claude installs on disk, or enrolled binaries whose hash changed after an update). Pass `--reconfigure` to force the full selection. `Esc` goes **back** a step in any menu (not straight out).
-
-**Change settings without restarting.** In the live dashboard press `Esc` (or `s`) to open a settings menu — update/reconfigure the baseline, verify, view the log — then `Esc`/Back to return to the live view. `seatguard autostart` installs a per-user logon entry (runs in the tray; no admin needed); `seatguard autostart remove` uninstalls it.
+**One control center for everything.** The control center is the hub you land on after setup, and the screen the live monitor opens into (press `Esc` in the monitor — there is no separate, dead-end settings menu). From one arrow-key menu you can: start / stop protection, open the live monitor, choose which Claude apps are protected, check for Claude updates, toggle **Start at logon**, verify integrity, **view** or **clear** the activity log, and **uninstall** seatguard. A status card at the top shows the posture, score, whether protection is running, the number of protected apps, alerts, and the autostart state. `Esc` always steps back (and quits from the top level); the two destructive actions — clear log and uninstall — ask for confirmation and default to **No**.
 
 This is the recommended path; the individual commands below exist for scripting.
 
 ### Live security dashboard
 
-`seatguard dashboard` shows an auto-refreshing security view: an overall posture (`PROTECTED` / `NEEDS ATTENTION` / `AT RISK` / `UNPROTECTED`), a 0–100 security score, per-check results, coverage gaps (Claude installs on disk that aren't enrolled, or enrolled binaries whose hash changed after an update), and the latest detection. Hotkeys: `q` quit · `v` re-verify integrity · `u` update the baseline (re-scan installs) · `l` recent journal.
+`seatguard dashboard` opens the control center on an auto-refreshing security view: an overall posture (`PROTECTED` / `NEEDS ATTENTION` / `AT RISK` / `UNPROTECTED`), a 0–100 security score, per-check results, coverage gaps (Claude installs on disk that aren't enrolled, or enrolled binaries whose hash changed after an update), and the latest detection. Hotkeys: `Esc`/`s` control-center menu · `q` quit · `v` re-verify integrity · `u` update the baseline (re-scan installs) · `l` recent journal.
 
 ### System tray (Windows)
 
@@ -59,14 +57,16 @@ This is the recommended path; the individual commands below exist for scripting.
 
 | Command | Description | Flags |
 |---------|-------------|-------|
-| `seatguard setup` | Interactive wizard: discover all Claude installs, enroll, start (also runs with no arguments) | `--poll`, plus common flags |
+| `seatguard setup` | First-run checklist wizard, then the control center (also runs with no arguments) | `--poll`, `--reconfigure`, plus common flags |
+| `seatguard dashboard` | Open the control center on the live security monitor (TUI); `Esc`/`s` = menu | common flags |
 | `seatguard enroll` | Create the protected baseline non-interactively (discovers claude/node) | `--claude-path`, `--claude-dir`, `--cred`, `--api-host`, `--api-ip`, `--poll`, `--no-discover` |
 | `seatguard run` | Foreground polling daemon; verifies DB integrity + its own binary hash at startup and refuses to run on mismatch (fail-safe); single-instance per baseline | `--tray` (Windows: hide in system tray), `--require-privileged` |
-| `seatguard dashboard` | Live auto-refreshing security dashboard (TUI); `Esc`/`s` opens in-app settings | `--refresh` |
 | `seatguard autostart` | `install` (default) / `remove` a per-user logon entry that runs in the tray (Windows; no admin) | common flags |
 | `seatguard status` | One-shot security posture + score | — |
 | `seatguard verify` | Check baseline HMAC, journal hash chain, daemon self-hash; nonzero exit on violation | — |
 | `seatguard log` | Print event journal (verifies chain) | `--json` for machine-readable output |
+| `seatguard clear-log` | Erase the activity log, starting a fresh tamper-evident chain (stops a running monitor first) | `--yes` (required) |
+| `seatguard uninstall` | Stop protection and remove all data (baseline, key, journal, state) + the autostart entry | `--yes` (required) |
 
 Common flags on all commands: `--db`, `--key`, `--journal`, `--state`
 

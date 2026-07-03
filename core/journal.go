@@ -217,3 +217,55 @@ func VerifyJournal(path string, key []byte) ([]Entry, error) {
 	}
 	return entries, nil
 }
+
+// clearAnchor is the payload of the "cleared" genesis record written when the
+// user deliberately wipes the journal. It records what was discarded for the
+// audit trail but starts a brand-new chain (MAC seeded from ""), because a full
+// wipe is an authenticated user action, not tampering: only a holder of the
+// separate HMAC key can produce a valid genesis, so it cannot be forged.
+type clearAnchor struct {
+	ClearedAt   string `json:"cleared_at"`
+	PrevRecords uint64 `json:"prev_records"`
+	PrevMAC     string `json:"prev_mac"`
+}
+
+// ClearJournal erases the event log and starts a fresh, still tamper-evident
+// chain whose genesis "cleared" record notes how many records were discarded.
+// It also removes any rotated archive. Best done while the daemon is stopped: a
+// running daemon holds stale in-memory chain state, so its next append would
+// open a sequence gap until it is restarted.
+func ClearJournal(paths Paths, key []byte) error {
+	prev, _ := readEntries(paths.Journal)
+	var prevSeq uint64
+	var prevMAC string
+	if n := len(prev); n > 0 {
+		prevSeq = prev[n-1].Seq
+		prevMAC = prev[n-1].MAC
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.Journal), 0o700); err != nil {
+		return err
+	}
+	os.Remove(paths.Journal + ".1") // drop the rotated archive too
+	data, _ := json.Marshal(clearAnchor{
+		ClearedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+		PrevRecords: prevSeq,
+		PrevMAC:     prevMAC,
+	})
+	g := Entry{Seq: 1, TS: time.Now().UTC().Format(time.RFC3339Nano), Type: "cleared", Data: data}
+	g.MAC = entryMAC(key, "", &g) // fresh chain: prevMAC is empty
+	line, err := json.Marshal(&g)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(paths.Journal, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		f.Close()
+		return err
+	}
+	f.Close()
+	platform.HardenFile(paths.Journal)
+	return nil
+}
