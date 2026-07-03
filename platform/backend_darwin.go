@@ -174,10 +174,16 @@ type procFDInfo struct {
 }
 
 // fdVnodePath resolves an fd to its filesystem path via
-// PROC_PIDFDVNODEPATHINFO. Path offset in struct vnode_fdinfowithpath:
-// proc_fileinfo(24) + vinfo_stat(136) = 160; buffer is 160 + MAXPATHLEN.
+// PROC_PIDFDVNODEPATHINFO, which fills a struct vnode_fdinfowithpath:
+//
+//	proc_fileinfo   pfi   // 24 bytes
+//	vnode_info_path pvip  // vnode_info(152) + vip_path[MAXPATHLEN]
+//
+// vnode_info = vinfo_stat(136) + vi_type(4) + vi_pad(4) + vi_fsid(8) = 152,
+// so the NUL-terminated path begins at 24 + 152 = 176 (the earlier 160 forgot
+// vi_type/vi_pad/vi_fsid, landing mid-struct on binary data).
 func fdVnodePath(pid, fd int32) (string, error) {
-	const pathOff = 160
+	const pathOff = 176
 	const size = pathOff + 1024
 	buf := make([]byte, size)
 	// err (not the raw return) signals failure, e.g. a non-vnode fd; the path
@@ -186,7 +192,34 @@ func fdVnodePath(pid, fd int32) (string, error) {
 		return "", err
 	}
 	p := buf[pathOff:]
-	return string(p[:clen(p)]), nil
+	s := string(p[:clen(p)])
+	if s == "" || s[0] != '/' {
+		// Layout-drift guard: the vnode path is the struct's only string and is
+		// absolute. If a future OS struct change shifts it, recover by scanning
+		// past the fixed-size numeric fields. Callers exact-match the result, so
+		// a spurious hit cannot misattribute — at worst this stays empty.
+		if i := indexSlash(buf, pathOff-16); i >= 0 {
+			q := buf[i:]
+			s = string(q[:clen(q)])
+		}
+	}
+	if s == "" {
+		return "", fmt.Errorf("no vnode path for pid %d fd %d", pid, fd)
+	}
+	return s, nil
+}
+
+// indexSlash returns the first index >= start where b holds '/', or -1.
+func indexSlash(b []byte, start int) int {
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i < len(b); i++ {
+		if b[i] == '/' {
+			return i
+		}
+	}
+	return -1
 }
 
 func (b *darwinBackend) HoldersOfFile(path string) ([]ProcessInfo, error) {
